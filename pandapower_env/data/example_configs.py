@@ -1,16 +1,17 @@
+import copy
 from typing import TYPE_CHECKING
 
 from pandapower.networks import case30
 
 from pandapower_env.action_space.action_space import (
-    create_unitary_substation_action,
+    add_actions_substation_line_switching,
 )
 from pandapower_env.substation.create_double_busbar_substation import create_all_double_busbar_substations
 from pandapower_env.toolbox.utils_profiles import (
     create_simbench_data_from_profiles,
     get_first_sb_profiles,
     get_orig_profiles,
-    scale_profiles,
+    make_constant_profiles,
 )
 from pandapower_env.toolbox.utils_scaling import ensure_no_zero_values, find_scaling_recursive
 
@@ -25,19 +26,27 @@ def config_case30() -> dict:
     for key, df in net.profiles.items():
         net.profiles[key] = df.replace(0.0, 1.0)
     orig_profiles = get_orig_profiles(net)
-    find_scaling_recursive(net, init_scaling=1, orig_profiles=orig_profiles, max_percent=35, overloaded_lines=3)
-    scale_profiles(net, orig_profiles)
+    find_scaling_recursive(net, init_scaling=1, orig_profiles=orig_profiles, max_percent=40, overloaded_lines=3)
     create_simbench_data_from_profiles(net, orig_profiles)
     create_all_double_busbar_substations(net)
-    actions = create_unitary_substation_action(net)
+    actions = add_actions_substation_line_switching(net)
     # delete net columns
     for eltype in ("gen", "sgen", "load"):
         if hasattr(net[eltype], "scenario_scaling"):
             del net[eltype]["scenario_scaling"]
-    return {
+    return  {
     "net": net,
     "n_episodes": 366,
     "episode_length": 96,
     "action_space": actions,
     "nminus1": False,
     }
+
+
+def constant_profiles(timestep: int, length: int) -> dict:
+    config = copy.deepcopy(config_case30())
+    net = config["net"]
+    make_constant_profiles(net, timestep, length)
+    config = copy.deepcopy(config)
+    config["episode_length"] = length
+    return config

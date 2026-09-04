@@ -1,18 +1,85 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
-from typing import TYPE_CHECKING
+import sys
+import warnings
+from pathlib import Path
+from typing import TYPE_CHECKING, TextIO
 
 import numpy as np
 import pandas as pd
 import simbench
+from IPython.core.interactiveshell import InteractiveShell
 
+if TYPE_CHECKING:
+    from types import TracebackType
+
+    import pandapower as pp
+    import pandapower.contingency
+    from pandapower import pandapowerNet
+#import
+
+# Suppress warnings
+warnings.simplefilter("ignore")
+
+# Suppress logging
+logging.getLogger().setLevel(logging.CRITICAL)
+
+# Suppress auto-output of expressions in Jupyter cells
+InteractiveShell.ast_node_interactivity = InteractiveShell.ast_node_interactivity.default_value
+
+
+class SuppressOutput:
+    def __enter__(self) -> None:
+        self._stdout = sys.stdout
+        self._stderr = sys.stderr
+        sys.stderr = Path(os.devnull).open("w")  # Suppress stderr
+
+        class PrintFilter:
+            def __init__(self, original_stdout: TextIO) -> None:
+                self._stdout = original_stdout
+                self._needs_newline = False  # Tracks if a newline is needed
+
+            def write(self, message: str) -> None:
+                if message.strip():  # Ignore empty messages
+                    if self._needs_newline:
+                        self._stdout.write("\n")  # Ensure a new line before printing
+                    self._stdout.write(message)
+                    self._needs_newline = not message.endswith(
+                        "\n",
+                    )  # Track if new line is needed
+
+            def flush(self) -> None:
+                self._stdout.flush()
+
+        self._filter = PrintFilter(self._stdout)
+        sys.stdout = self._filter  # Redirect stdout through filter
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        sys.stderr.close()  # Close stderr redirection
+        sys.stderr = self._stderr  # Restore stderr
+        sys.stdout = self._stdout  # Restore stdout
 if TYPE_CHECKING:
     import pandapower as pp
     import pandapower.contingency
     from pandapower import pandapowerNet
 logger = logging.getLogger(__name__)
+
+
+
+
+
+
+
+
+
 
 def deterministic_profiles(net: pp.pandapowerNet, sb_index: int = 0) -> dict[str, pd.DataFrame]:
     """
@@ -570,3 +637,31 @@ def setup_profiles(
     )
 
     return df_profiles_load_p, df_profiles_load_q, df_profiles_sgen_p, df_profiles_gen_p
+
+
+def make_constant_profiles(net: pandapowerNet, row_index: int, num_copies: int) -> None:
+    """
+    Duplicate a single row from all profile DataFrames in the network.
+
+    Parameters
+    ----------
+    net : pandapowerNet
+        The pandapower network object containing profiles
+    row_index : int
+        Index of the row to duplicate
+    num_copies : int
+        Number of times to duplicate the row
+
+    Raises
+    ------
+    ValueError
+        If the network object does not have a 'profiles' attribute
+    """
+    if not hasattr(net, "profiles"):
+        msg = "The given network object does not have a 'profiles' attribute."
+        raise ValueError(msg)
+
+    for key in net.profiles:
+        row_to_duplicate = net.profiles[key].iloc[row_index:row_index+1]
+        result = pd.concat([row_to_duplicate] * num_copies, ignore_index=True)
+        net.profiles[key] = result

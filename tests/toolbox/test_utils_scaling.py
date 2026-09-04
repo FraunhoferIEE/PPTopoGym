@@ -1,5 +1,4 @@
 import pandapower as pp
-import pandas as pd
 
 from pandapower_env.toolbox.utils_profiles import (
     get_first_sb_profiles,
@@ -22,50 +21,17 @@ from pandapower_env.toolbox.utils_scaling import (
 )
 
 
-def test_find_max_timestep(test_grid_dbb_plus_simbench) -> None:
+def test_find_max_timestep(simenv) -> None:
     """
     Test the find_max_timestep function.
 
     :param test_grid_dbb_plus_simbench: test_grid_dbb_plus_simbench fixture (see conftest.py)
     :type test_grid_dbb_plus_simbench: pandapowerNet
     """
-    net = test_grid_dbb_plus_simbench
-    def setup_profiles(net: pp.pandapowerNet) -> tuple:
-        df_profiles_load_p = pd.DataFrame(
-            {
-                ld["name"]: ld.p_mw * net.profiles["load"]["{}_pload".format(ld["profile"])]
-                for i, ld in net.load.iterrows()
-            },
-        )
-
-        df_profiles_load_q = pd.DataFrame(
-            {
-                ld["name"]: ld.q_mvar
-                * net.profiles["load"]["{}_qload".format(ld["profile"])]
-                for i, ld in net.load.iterrows()
-            },
-        )
-
-        df_profiles_sgen_p = pd.DataFrame(
-            {
-                sgen["name"]: sgen.p_mw * net.profiles["renewables"][sgen["profile"]]
-                for i, sgen in net.sgen.iterrows()
-            },
-        )
-
-        df_profiles_gen_p = pd.DataFrame(
-            {
-                gen["name"]: gen.p_mw * net.profiles["powerplants"][gen["profile"]]
-                for i, gen in net.gen.iterrows()
-            },
-        )
-        return (
-            df_profiles_load_p,
-            df_profiles_load_q,
-            df_profiles_sgen_p,
-            df_profiles_gen_p,
-        )
-    p,q,sp,gp = setup_profiles(net)
+    p = simenv.df_profiles_load_p
+    q = simenv.df_profiles_load_q
+    sp = simenv.df_profiles_sgen_p
+    gp = simenv.df_profiles_gen_p
     max_timestep = find_max_timestep(p, q, sp, gp)
     assert isinstance(max_timestep, int)
     # assure, that the function can be called several times

@@ -101,16 +101,23 @@ def test_grid_dbb_plus_simbench() -> pandapowerNet:
     )
     net.load["name"] = net.load.index.to_series().apply(lambda x: f"Load {x}")
 
+    n_gen = len(net.gen)
+    n_loads = len(net.load)
+    profile = [3.0, 3.0, 3.0, 3.0, 2.0]
+    profile_end = [3.0, 3.0, 3.0, 3.0, 3.0]  # last number differs
+    columns_list = [profile] * 2 * (n_loads-1)
+    columns_list += ([profile_end]*2)
     df_loads = pd.DataFrame(
-        {
-            "profile1_pload": [3.0, 3.0, 3.0, 3.0, 3.0],
-            "profile1_qload": [0.1, 0.1, 0.1, 0.1, 0.1],
-        },
-    )
-    df_powerplants = pd.DataFrame({"profile1": [5.0, 5.0, 5.0, 5.0, 5.0]})
-
-    net.load["profile"] = "profile1"
-    net.gen["profile"] = "profile1"
+        columns_list,
+    ).T
+    df_loads.columns = [
+        col
+        for i in range(1, n_loads + 1)
+        for col in (f"load {i}_pload", f"load {i}_qload")
+    ]
+    df_powerplants = pd.DataFrame({
+        f"profile{i + 1}": [5.0, 5.0, 5.0, 5.0, 5.0] for i in range(n_gen)
+    })
 
     profiles = {"load": df_loads, "powerplants": df_powerplants}
     net.profiles = profiles

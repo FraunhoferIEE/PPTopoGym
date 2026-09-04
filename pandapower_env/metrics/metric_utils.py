@@ -256,8 +256,10 @@ class EvaluateMetrics:
             if isinstance(method, FloatMetric):
                 result.append(method.__str__())
                 result.append(method.format_with_instance(self.metrics))
+
         if not result:
             return "No metrics were evaluated"
+
         return "\n".join(result)
 
     def gather_results(self) -> dict[str, dict[str, Any]]:
@@ -271,8 +273,7 @@ class EvaluateMetrics:
 
         Returns
         -------
-            dict[dict[str, Any]]: Dictionary of metric information
-            dict[dict[str, Any]]: List of dictionaries containing metric information
+            dict[dict[str, Any]]: Dict of dictionaries containing metric information
         """
         results: dict = {}
 

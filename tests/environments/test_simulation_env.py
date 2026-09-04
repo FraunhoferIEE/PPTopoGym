@@ -48,7 +48,9 @@ def test_state_to_info(simenv) -> None:
     assert isinstance(info, dict), f"Expected dict, got {type(info)}"
     assert "prev_actions" in info, "'log_actions' key missing in info"
     assert "current_step" in info, "'current_step' key missing in info"
-    assert "index_profile" in info, "'current_simulation_log' key missing in info"
+    assert "index_profile" in info, "'index_profile' key missing in info"
+
+
 
 
 def test_create_observation(simenv) -> None:
@@ -88,6 +90,16 @@ def test_step_function(simenv, env_config) -> None:
     assert (
         len(outputs) == num_outputs
     ), "Step function did not return correct number of outputs"
+
+def test_load_action(simenv) -> None:
+    simenv.net.converged = "test"
+    prev_converged = simenv.net.converged
+    simenv.load_action(0)
+    assert simenv.net.converged == prev_converged, "Load action with 0 should not change convergence status"
+    prev_net_switch = copy.deepcopy(simenv.net.switch["closed"])
+    simenv.load_action(1)
+    assert not (simenv.net.switch["closed"] == prev_net_switch).all(), "Load action with 1 should change switch states"
+
 
 
 def test_reset_function(simenv) -> None:
@@ -174,6 +186,19 @@ def test_state_from_info(simenv, simenv2) -> None:
     assert len(info["prev_actions"]) == 1, \
         f"actual length of prev_actions {info['prev_actions']} is {len(info['prev_actions'])}"
     simenv2.state_from_info(info)
+    # check that self.index has the correct value
+    assert simenv2.index == simenv.index, f"Index does not match: {simenv2.index} != {simenv.index}"
+    simenv.reset(options={"index": 0})
+    simenv.step(0)
+    current_step_simenv = simenv.current_step
+    info = simenv.state_to_info()
+    assert len(info["prev_actions"]) != 0 # passes
+    info_index = copy.deepcopy(info["index_profile"])
+    simenv2.state_from_info(info)
+    assert current_step_simenv == simenv.current_step # does not pass
+    assert info_index == simenv.index, f"Index does not match: {info_index} != {simenv.index}"
+    assert simenv2.current_step == len(info["prev_actions"]), \
+        f"Step does not match: {simenv.current_step} != {len(info['prev_actions'])}"
 
     pp.runpp(simenv2.net)
     assert (
@@ -229,7 +254,9 @@ def test_custom_observation(env_config) -> None:
     env_config["n_episodes"] = 2
     env_config["observation"] = [{"name": name, "function": custom_obs, "spaces": space_test}]
     env = PPTopoGym(env_config)
+    env.reset()
     obs = env.create_observation()
+    assert name in env.custom_obs
     assert obs["test_obs"] == mag_compare_value
 
 def test_current_step(simenv) -> None:

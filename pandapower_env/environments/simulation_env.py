@@ -394,7 +394,8 @@ class PPTopoGym(BaseEnvPP):
         self.index = last_state["index_profile"]
         self.current_step = len(self.log_actions)
         # loaded into the net in super().step()
-        if not self.run_pf():
+        self.run_pf()
+        if self.net.converged is False:
             msg = f"Power flow did not converge at step {self.current_step}"
             logger.exception(msg)
             self._handle_loadflow_failure()
@@ -786,26 +787,26 @@ class PPTopoGym(BaseEnvPP):
                 raise ValueError(msg)
 
 
-    def create_observation(self, run_pf: bool | None = None) -> dict:
+    def create_observation(self) -> dict:
         """
         Generate an observation of the current network state.
 
         Observations capture the key features of the network state that agents use to
         make decisions. Currently, this includes the loading percentage of all lines.
 
-        :param run_pf: Flag indicating whether the power-flow calculation should be done in the function.
-        :type run_pf: bool
         :return: A dictionary containing the current line loadings.
         :rtype: dict
 
         """
+        if not hasattr(self.net, "converged"):
+            msg = "Power flow has not been run yet. Please run power flow before creating an observation."
+            raise ValueError(msg)
         observation = {}
+        converged = self.net.converged
 
         # Adjacency information
         create_adjacency_matrix(self.net).astype(np.int32)
-        if run_pf is None:
-            run_pf = self.run_pf()
-        if run_pf:
+        if converged:
             for key in self.default_obs_keys:
                 observation[key] = self._get_default_observation(key)
             for key, fct in self.custom_obs.items():
@@ -831,16 +832,35 @@ class PPTopoGym(BaseEnvPP):
             "prev_actions": self.log_actions,
             "current_step": self.current_step,
             "index_profile": self.index,
+            "_source_instance_id": id(self),
         }
 
     def state_from_info(self, info: dict) -> None:
+        """
+        Restore the environment's state from a given information dictionary.
+
+        Function to restore from: state_to_info.
+
+        !! This cannot be called from the same instance, only from another instance.
+
+        Args:
+            info (dict): A dictionary containing the state information to restore.
+        """
+        # Check if this is being called on the same instance that created the info
+        if "_source_instance_id" in info and info["_source_instance_id"] == id(self):
+            msg = (
+                "state_from_info() cannot be called on the same instance that created the "
+                "info dictionary. Use a different environment instance to restore state."
+            )
+            raise ValueError(msg)
         index = info.get("index_profile")
         if index is not None:
             self.reset(options={"index": index})
         else:
             self.reset()
         if len(info["prev_actions"]) == 0:
-            if self.run_pf():  # run powerflow
+            self.run_pf() # run powerflow
+            if self.net.converged is True:
                 return
             msg = "Power flow did not converge for the step 0 in create_observation."
             raise pp.LoadflowNotConverged(msg)
@@ -849,10 +869,11 @@ class PPTopoGym(BaseEnvPP):
         for action in info["prev_actions"][:-1]:
             self.load_action(action)
             self.log_actions.append(action)
-        self.index = info["index_profile"]
-        self.current_step = len(self.log_actions)
+        self.index = info["index_profile"] -1 #gets incremented in step
+        self.current_step = info["current_step"] - 1  # gets incremented in step
         # run powerflow for the last action
         self.step(info["prev_actions"][-1])
+
 
 
     def _default_reward_function(self) -> float:
@@ -893,6 +914,11 @@ class PPTopoGym(BaseEnvPP):
         :type action: int | np.integer
         :raises KeyError: If the `df_actions` DataFrame does not contain the required columns
         """
+        prev_converged = self.net.converged if hasattr(self.net, "converged") else None
+        super().load_action(action)
+        if action == 0:
+            self.net.converged = prev_converged
+            return # 0 does nothing
         if {"open_switches", "closed_switches"}.issubset(self.df_actions.columns):
             # open switches of action
             open_switches = self.df_actions.loc[action, "open_switches"]
@@ -944,13 +970,14 @@ class PPTopoGym(BaseEnvPP):
         super().reset(seed=seed, options=options)
 
         # Return initial observation and empty info dictionary
-        if not self.run_pf():
+        self.run_pf() # run powerflow
+        if self.net.converged is False:
             logger.warning(
                 "Warning: net did not converge. skipping profile index %s.",
                 self.index,
             )
-            return self.create_observation(run_pf=False), {}
-        return self.create_observation(run_pf=True), {}
+            return self.create_observation(), {}
+        return self.create_observation(), {}
 
     def __str__(self) -> str:
         # Determine the types of actions available

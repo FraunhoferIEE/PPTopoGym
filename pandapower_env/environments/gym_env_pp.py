@@ -4,17 +4,15 @@ import copy
 import logging
 import random
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, SupportsFloat, TypeVar
+from typing import Any, SupportsFloat, TypeVar
 
 import gymnasium as gym
+import numpy as np
 import pandapower as pp
 import pandapower.contingency
 import pandas as pd
 
 from pandapower_env.toolbox.utils import run_nminus1_powerflow, run_powerflow
-
-if TYPE_CHECKING:
-    import numpy as np
 
 ObsType = TypeVar("ObsType")
 
@@ -65,6 +63,7 @@ class BaseEnvPP(gym.Env, ABC):
             self.net = env_config["net"]
         else:
             self.net = pp.from_json(env_config["net_file"])
+        self.net.converged = None  # initially, no powerflow has been run
         self.net_copy_from = copy.deepcopy(self.net)
 
         if "profiles" not in self.net:
@@ -91,84 +90,139 @@ class BaseEnvPP(gym.Env, ABC):
 
         self.worst_reward = env_config.get("worst_reward", -1000.)
 
-    def setup_profiles(self) -> None:
+    def setup_profiles(self) -> None: #noqa: PLR0915, PLR0912, C901
         """
         Configure profiles for load, gen, etc. timeseries.
 
         The code expects that the pandapowerNet contains a key-value pair "profiles"
         containing a dictionary:
-        net.profiles = {'load': [Dataframe], 'renewables': [Dataframe], 'powerplants': [Dataframe]}
+        net.profiles = {
+            'load': [Dataframe], #load.p_mw AND load.q_mvar
+            'renewables': [Dataframe], # sgen.p_mw
+            'powerplants': [Dataframe], # gen.p_mw
+            'gen_vm': [Dataframe], # gen.vm_pu (voltage PER UNIT, scaling the bus-voltages)
+            'sgen_q': [Dataframe], # sgen.q_mvar
+            }
+        (This profile format matches the conventions used in simbench.)
 
         The dataframes hold the timeseries, each with a unique [column] name.
         For loads, timeseries must have column names "NAME_pload" and "NAME_qload" for active
         and reactive power, respectively.
 
-        The e.g. net.load Dataframe should contain a column called "profile" which
-        contains the column in the Dataframe net.profiles['load'] to use as a profile for each
-        load. (Same for net.sgen and net.gen.)
+        Then, the workflow is:
+        1. extract the dfs for load_p, load_q, gen_p, gen_vm, sgen_p, sgen_q
+        2. Make the DFs match the length of the number of corresponding net-elements
+        3. Multiply the profile-values with the current load.p_mw, load.p_mvar, ... values
+        4. Store the results in (then unchangeable!) profile dataframes.
 
-        (This profile format matches the conventions used in simbench.)
+        There must be one profile column per net-element.
         """
-        if self.net.load["name"].unique().shape != self.net.load["name"].shape:
-            msg = "Load names must be unique!"
-            raise RuntimeError(msg)
+        # get number of elements:
+        n_load = len(self.net.load)
+        n_gen = len(self.net.gen)
+        n_sgen = len(self.net.sgen)
+        # get length of profiles:
+        len_profiles = 0
+        if "load" in self.net.profiles:
+            len_profiles = len(self.net.profiles["load"])
+        if "powerplants" in self.net.profiles:
+            len_pp = len(self.net.profiles["powerplants"])
+            if (len_profiles > 0) and (len_pp > 0) and (len_pp != len_profiles):
+                msg = "The profiles have different number of timesteps."
+                raise RuntimeError(msg)
+            len_profiles = max(len_profiles, len_pp)
+        if "renewables" in self.net.profiles:
+            len_renewables = len(self.net.profiles["renewables"])
+            if (len_profiles > 0) and (len_renewables > 0) and (len_renewables != len_profiles):
+                msg = "The profiles have different number of timesteps."
+                raise RuntimeError(msg)
+            len_profiles = max(len_renewables, len_profiles)
+        if "gen_vm" in self.net.profiles:
+            len_genvm = len(self.net.profiles["gen_vm"])
+            if (len_profiles > 0) and (len_genvm > 0) and (len_genvm != len_profiles):
+                msg = "The profiles have different number of timesteps."
+                raise RuntimeError(msg)
+            len_profiles = max(len_profiles, len_genvm)
+        if "sgen_q" in self.net.profiles:
+            len_sgenq = len(self.net.profiles["sgen_q"])
+            if (len_profiles > 0) and (len_sgenq > 0) and (len_sgenq != len_profiles):
+                msg = "The profiles have different number of timesteps."
+                raise RuntimeError(msg)
+            len_profiles = max(len_profiles, len_sgenq)
+        if len_profiles == 0:
+            return # no profiles to add
 
-        if self.net.gen["name"].unique().shape != self.net.gen["name"].shape:
-            msg = "Generator names must be unique!"
-            raise RuntimeError(msg)
 
-        if self.net.sgen["name"].unique().shape != self.net.sgen["name"].shape:
-            msg = "Static generator names must be unique!"
-            raise RuntimeError(msg)
 
-        self.df_profiles_load_p = pd.DataFrame(
-            {
-                ld["name"]: ld.p_mw * self.net.profiles["load"]["{}_pload".format(ld["profile"])]
-                for i, ld in self.net.load.iterrows()
-            },
-        )
 
-        self.df_profiles_load_q = pd.DataFrame(
-            {
-                ld["name"]: ld.q_mvar * self.net.profiles["load"]["{}_qload".format(ld["profile"])]
-                for i, ld in self.net.load.iterrows()
-            },
-        )
+        #extract load_p, load_q dataframes:
+        if n_load > 0:
+            if "load" not in self.net.profiles:
+                msg = "No profiles for pp net.load defined (DF 'load' storing NAME_pload, NAME_qload columns.)."
+                raise RuntimeError(msg)
+            n_needed_columns = 2*n_load +1 if "time" in self.net.profiles["load"].columns else 2*n_load
+            if self.net.profiles["load"].shape[1] < n_needed_columns: # has one time column
+                msg = "load does not have enough profiles for all load elements in pp net."
+                raise RuntimeError(msg)
+            df_load_p = self.net.profiles["load"].filter(regex="_pload$").iloc[:, :n_load]
+            #extract load_q dataframe:
+            df_load_q = self.net.profiles["load"].filter(regex="_qload$").iloc[:, :n_load]
+        # extract sgen_p dataframe:
+        if n_sgen > 0:
+            if "renewables" not in self.net.profiles:
+                msg = "No profiles for pp net.sgen defined ('renewables' for sgen_p, 'sgen_q' for sgen_q.)."
+                raise RuntimeError(msg)
+            df_sgen_p = self.net.profiles["renewables"].drop(columns="time", errors="ignore").iloc[:, :n_sgen]
+            # Optional: extract sgen_q from net.profiles["sgen_q]
+            if "sgen_q" in self.net.profiles:
+                if self.net.profiles["sgen_q"].shape[1] < n_sgen:
+                    msg = "sgen_q does not have enough profiles for all sgen elements in pp net."
+                    raise RuntimeError(msg)
+                df_sgen_q = self.net.profiles["sgen_q"].drop(columns="time", errors="ignore").iloc[:, :n_sgen]
+            # else-case handled below
 
-        self.df_profiles_sgen_p = pd.DataFrame(
-            {
-                sgen["name"]: sgen.p_mw * self.net.profiles["renewables"][sgen["profile"]]
-                for i, sgen in self.net.sgen.iterrows()
-            },
-        )
+        if n_gen > 0:
+            if "powerplants" not in self.net.profiles:
+                msg = "No profiles for pp net.gen defined ('powerplants' for gen_p)."
+                raise RuntimeError(msg)
+            if self.net.profiles["powerplants"].shape[1] < n_gen:
+                msg = "The DF renewables does not have enough profiles for all gen elements in pp net."
+                raise RuntimeError(msg)
+            # extract gen_p dataframe:
+            df_gen_p = self.net.profiles["powerplants"].drop(columns="time", errors="ignore").iloc[:, :n_gen]
 
-        # simbench does not habe sgen_q profiles, so we set them to 0
-        self.df_profiles_sgen_q = pd.DataFrame(
-            {
-                sgen["name"]: pd.Series(
-                    0.0,
-                    index=self.net.profiles["renewables"][sgen["profile"]].index,
-                )
-                for i, sgen in self.net.sgen.iterrows()
-            },
-        )
+            if "gen_vm" in self.net.profiles:
+                if self.net.profiles["gen_vm"].shape[1] < n_gen:
+                    msg = "gen_vm does not have enough profiles for all gen elements in pp net."
+                    raise RuntimeError(msg)
+                df_gen_vm = self.net.profiles["gen_vm"].drop(columns="time", errors="ignore").iloc[:, :n_gen]
+            # else-case handled below
 
-        self.df_profiles_gen_p = pd.DataFrame(
-            {
-                gen["name"]: gen.p_mw * self.net.profiles["powerplants"][gen["profile"]]
-                for i, gen in self.net.gen.iterrows()
-            },
-        )
 
-        self.df_profiles_gen_vm = pd.DataFrame(
-            {
-                gen["name"]: pd.Series(
-                    gen.vm_pu,
-                    index=self.net.profiles["powerplants"][gen["profile"]].index,
-                )
-                for _, gen in self.net.gen.iterrows()
-            },
-        )
+        # build dataframes:
+        if n_load > 0:
+            self.df_profiles_load_p = df_load_p @ np.diag(self.net.load.p_mw.to_numpy())
+            self.df_profiles_load_q = df_load_q @ np.diag(self.net.load.q_mvar.to_numpy())
+        if n_gen > 0:
+            self.df_profiles_gen_p = df_gen_p @ np.diag(self.net.gen.p_mw.to_numpy())
+        if n_sgen > 0:
+            self.df_profiles_sgen_p = df_sgen_p @ np.diag(self.net.sgen.p_mw.to_numpy())
+
+        #optional dataframes:
+        if "sgen_q" in self.net.profiles:
+            self.df_profiles_sgen_q = df_sgen_q @ np.diag(self.net.sgen.q_mvar.to_numpy())
+        else: # set to 0
+            self.df_profiles_sgen_q = pd.DataFrame(
+                np.zeros((len_profiles, n_sgen)),
+            )
+        if "gen_vm" in self.net.profiles:
+            self.df_profiles_gen_vm = df_gen_vm @ np.diag(self.net.gen.vm_pu.to_numpy())
+        else: # set constantly to gen.vm_pu value (as this seldomly changes in applications)
+            vm_values = self.net.gen.vm_pu.to_numpy()
+            self.df_profiles_gen_vm = pd.DataFrame(
+                np.tile(vm_values, (len_profiles, 1)),  # shape (n_rows, n_cols)
+                columns=[f"gen {i + 1}_vm" for i in range(len(vm_values))],  # valid column names
+            )
 
 
         if self.n_episodes <= 0:
@@ -178,19 +232,23 @@ class BaseEnvPP(gym.Env, ABC):
         """
         Load profiles for a given timestep into the net.load, etc. Dataframes.
 
+        Replace the load p and q with the values stored in the profiles_load dataframe
+
         :param index: The index of the desired timestep, in the timeseries Dataframe.
         :type index: int
         """
-        # Replace the load p and q with the values stored in the profiles_load dataframe
         if len(self.net.load):
             self.net.load["p_mw"] = self.df_profiles_load_p.loc[index].T.to_numpy()
             self.net.load["q_mvar"] = self.df_profiles_load_q.loc[index].T.to_numpy()
 
         if len(self.net.sgen):
             self.net.sgen["p_mw"] = self.df_profiles_sgen_p.loc[index].T.to_numpy()
+            self.net.sgen["q_mvar"] = self.df_profiles_sgen_q.loc[index].T.to_numpy()
 
         if len(self.net.gen):
             self.net.gen["p_mw"] = self.df_profiles_gen_p.loc[index].T.to_numpy()
+            self.net.gen["vm_pu"] = self.df_profiles_gen_vm.loc[index].T.to_numpy()
+        self.net.converged = None  # reset converged flag
 
     def run_pf(
         self,
@@ -219,10 +277,16 @@ class BaseEnvPP(gym.Env, ABC):
                     msg = "N-1 analysis ran but didn't store max_loading_percent"
                     raise RuntimeError(msg)
             else:
+                if self.net.converged is not None:
+                    return self.net.converged
                 run_powerflow(self.net, pf_type, use_ls2g)
         except pp.LoadflowNotConverged:
+            self.net.converged = False
             return False
+        self.net.converged = True
         return True
+
+
 
     def step(
         self,
@@ -246,7 +310,8 @@ class BaseEnvPP(gym.Env, ABC):
         self.load_action(action)
 
         # Run the powerflow
-        if not self.run_pf(): # should actually verify action and do DoNothing instead
+        self.run_pf()
+        if self.net.converged is False: # should actually verify action and do DoNothing instead
             #if action is 0, then skip the next line
             #else set action to 0 and call this function again
 
@@ -254,7 +319,7 @@ class BaseEnvPP(gym.Env, ABC):
             truncated = False
             logger.warning("Net did not converge.")
             return (
-                self.create_observation(run_pf=False),
+                self.create_observation(),
                 self.worst_reward,
                 terminated,
                 truncated,
@@ -274,7 +339,7 @@ class BaseEnvPP(gym.Env, ABC):
             "loading_percent": self.net.res_line.loading_percent.max(),
         }
         if truncated:
-            observation = self.create_observation(run_pf=True)
+            observation = self.create_observation()
             return observation, reward, terminated, truncated, info
         self.index += 1
         self.load_profile_timestep_into_net(self.index)
@@ -331,28 +396,26 @@ class BaseEnvPP(gym.Env, ABC):
         """Close function -- kept here for compatibility with gym."""
         return
 
-    @abstractmethod
-    def load_action(self, action: int | np.integer) -> None:
+    def load_action(self, *_: Any) -> None: # noqa: ANN401
         """
         Apply the action to the pandapower network.
 
-        This function must be implemented in the derived class.
+        This base implementation resets the power flow status. Derived classes
+        should override this method with their specific signature and call
+        super().load_action() to ensure the status is reset.
 
-        :param action: The action
-        :type action: TBD
+        :param args: Positional arguments (defined by derived classes)
         """
-        msg = "The load_action method must be implemented in a derived class."
-        raise NotImplementedError(msg)
+        self.net.converged = None  # reset converged flag for new topology
 
     @abstractmethod
-    def create_observation(self, run_pf: bool | None = None) -> list[float] | dict:
+    def create_observation(self) -> list[float] | dict:
         """
         Create the observation from the result of the powerflow calculation in net.res_line and net.res_bus.
 
         This function must be implemented in the derived class.
+        The powerflow must have been run before, saving "self.net.converged" flag to True.
 
-        :param run_pf: Flag indicating whether the power-flow calculation should be done in the function.
-        :type run_pf: bool
         :return: observation
         :rtype: TBD
         """

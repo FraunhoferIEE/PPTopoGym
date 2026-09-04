@@ -1,3 +1,5 @@
+import copy
+
 import numpy as np
 import pytest
 
@@ -44,7 +46,8 @@ def test_greedyagent(env_config) -> None:
     # Create an instance of GreedyAgent
     agent = GreedyAgent(env.action_space, env_config)
     observation = agent.env.create_observation()
-    info = agent.env.state_to_info()
+    agent2 = copy.deepcopy(agent)
+    info = agent2.env.state_to_info()
     action = agent.act(observation, info)
     assert isinstance(action, (int, np.integer)), "action is not an integer."
     assert action in agent.action_space, "action is not in the action space."
@@ -73,7 +76,8 @@ def test_greedynminus1agent(env_config) -> None:
 
     # act should be robust and return a valid action
     observation = agent.env.create_observation()
-    info = agent.env.state_to_info()
+    agent2= copy.deepcopy(agent)
+    info = agent2.env.state_to_info()
     try:
         best_action = agent.act(observation=observation, info=info)
         assert isinstance(best_action, (int, np.integer))

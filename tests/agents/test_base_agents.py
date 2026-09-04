@@ -93,7 +93,8 @@ def test_basegreedyagent(env_config: dict) -> None:
 
     # act must return a valid action
     observation = agent.env.create_observation()
-    info = agent.env.state_to_info()
+    agent2 = copy.deepcopy(agent)
+    info = agent2.env.state_to_info()
     result = agent.act(observation, info)
     assert isinstance(result, (int, np.integer))
     assert result in agent.action_space

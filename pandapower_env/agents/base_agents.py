@@ -25,7 +25,7 @@ class BaseAgent(ABC):
 
     The agent class initializes the action space and the environment.
     :param action_space: The action space of the environment.
-    :type action_space: list
+    :type action_space: spaces.Discrete
     :param env_config: The environment the agent interacts with. (as config)
     :type env_config: dict
 
@@ -40,6 +40,7 @@ class BaseAgent(ABC):
         self.action_space = action_space
         if env_config:
             self.env = PPTopoGym(env_config)
+            self.env.reset()
 
     @abstractmethod
     def act(self, *args: Any, **kwargs: Any) -> int | np.integer:  # noqa: ANN401
@@ -201,7 +202,7 @@ class BaseGreedyAgent(BaseAgent):
         # minimal payloads
         static_blob = getattr(self.env, "static_net_blob", None) or self.env.dump_static_net_bytes()
         base_topology = self.env.snapshot_topology()
-        prof = self.env.get_profile_slice(self.env.index + 1)
+        prof = self.env.get_profile_slice(self.env.index)
 
         pf_mode = "dc" if self.dc_approximation else "ac"
         need_n1 =  self.feedback_type == "nminus1"
