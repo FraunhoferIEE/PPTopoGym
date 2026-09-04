@@ -12,9 +12,6 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
-    import pandas as pd
-
-if TYPE_CHECKING:
     from pandapower import pandapowerNet
 
 
@@ -171,10 +168,6 @@ def nminus1_bus_overloading_percentage(net: pandapowerNet) -> float:
     return n_overloaded / n_connected
 
 
-def line_loading(net: pandapowerNet) -> pd.Series:
-    """Give back plain line loadings."""
-    return net.res_line.loading_percent
-
 def line_loading_mean(net: pandapowerNet) -> float:
     """
     Calculate the mean line loading over all lines in a net.
@@ -276,6 +269,8 @@ def nminus1_line_loading_max(net: pandapowerNet) -> float:
     return np.nanmax(net.res_line.max_loading_percent)
 
 
+
+
 def line_loading_max(net: pandapowerNet) -> float:
     """
     Calculate the maximum loading over all lines for n-0.
@@ -327,3 +322,88 @@ def overload_energy(net: pandapowerNet) -> float:
 
     # Finally, we sum up the values of each line to get the total overload energy for the grid
     return np.sum(net.res_line.overload_energy_mw)
+
+
+def trafo_power_losses_sum(net: pandapowerNet) -> float:
+    """
+    Calculate the sum of active power losses of all transformers.
+
+    :param net: a pandapower net
+    :type net: pandapowerNet
+    :return: sum of active power losses of all transformers in MW
+    :rtype: float
+    """
+    if net.res_trafo.empty:
+        return 0.0
+    return float(np.nan_to_num(np.sum(net.res_trafo.pl_mw), nan=0.0))
+
+
+def system_losses_sum(net: pandapowerNet) -> float:
+    """
+    Calculate total system losses (lines + transformers).
+
+    :param net: a pandapower net
+    :type net: pandapowerNet
+    :return: total system losses in MW
+    :rtype: float
+    """
+    line_loss = line_power_losses_sum(net) if not net.res_line.empty else 0.0
+    trafo_loss = trafo_power_losses_sum(net)
+    return float(np.nan_to_num(line_loss + trafo_loss, nan=0.0))
+
+
+def total_load_p(net: pandapowerNet) -> float:
+    """
+    Calculate total active power consumption from load results.
+
+    :param net: a pandapower net
+    :type net: pandapowerNet
+    :return: total active load power in MW, 0.0 if no results
+    :rtype: float
+    """
+    if not hasattr(net, "res_load") or net.res_load.empty:
+        return 0.0
+    return float(np.nan_to_num(net.res_load["p_mw"].sum(), nan=0.0))
+
+
+def total_gen_p(net: pandapowerNet) -> float:
+    """
+    Calculate total active power generation from gen and sgen results.
+
+    :param net: a pandapower net
+    :type net: pandapowerNet
+    :return: total active generation power in MW, 0.0 if no results
+    :rtype: float
+    """
+    total = 0.0
+    if hasattr(net, "res_gen") and not net.res_gen.empty:
+        total += float(np.nan_to_num(net.res_gen["p_mw"].sum(), nan=0.0))
+    if hasattr(net, "res_sgen") and not net.res_sgen.empty:
+        total += float(np.nan_to_num(net.res_sgen["p_mw"].sum(), nan=0.0))
+    return total
+
+
+def has_gen_results(net: pandapowerNet) -> bool:
+    """
+    Check if generation results exist in the network.
+
+    :param net: a pandapower net
+    :type net: pandapowerNet
+    :return: True if gen or sgen results exist
+    :rtype: bool
+    """
+    res_gen_exists = hasattr(net, "res_gen") and not net.res_gen.empty
+    res_sgen_exists = hasattr(net, "res_sgen") and not net.res_sgen.empty
+    return res_gen_exists or res_sgen_exists
+
+
+def has_load_results(net: pandapowerNet) -> bool:
+    """
+    Check if load results exist in the network.
+
+    :param net: a pandapower net
+    :type net: pandapowerNet
+    :return: True if load results exist
+    :rtype: bool
+    """
+    return hasattr(net, "res_load") and not net.res_load.empty

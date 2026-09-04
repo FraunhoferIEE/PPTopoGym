@@ -33,3 +33,11 @@ def test_find_smooth_scenario_indices_sorted(env_config) -> None:
     assert sorted(indices) == [np.int64(0)]
     assert isinstance(indices, list)
     assert all(isinstance(i, np.integer) for i in indices)
+
+
+def test_poly_fit_error_defaults_to_cubic() -> None:
+    """The default degree is 3; a higher degree can only fit the same data at least as well."""
+    y = np.array([0.0, 1.0, 0.0, 2.0, 1.0, 3.0, 2.0, 4.0], dtype=float)
+
+    assert np.isclose(utils_data.poly_fit_error(y), utils_data.poly_fit_error(y, degree=3))
+    assert utils_data.poly_fit_error(y, degree=6) <= utils_data.poly_fit_error(y, degree=3) + 1e-9

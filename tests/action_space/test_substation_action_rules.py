@@ -23,7 +23,9 @@ def test_rules(test_grid_multi_bb_substations) -> None:
             state_str = bin(state)[2:].zfill(n_bits)
             n_sym += passes_two_bus_symmetry_rule(state_str)
             pass_test = passes_two_bus_symmetry_rule(state_str)
-            should_pass_test = state_str[0] != "0"
+            # 0-indexed busbar convention: the first element must sit on bus 0, so a
+            # configuration passes the symmetry rule iff its first digit is "0".
+            should_pass_test = state_str[0] == "0"
             assert should_pass_test == pass_test, f"{state_str} symmetry rule was not passed"
             n_elements += passes_n_elements_rule(state_str)
             n_island += passes_islanded_elements_rule(sub, state_str)

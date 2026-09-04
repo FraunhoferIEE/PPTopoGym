@@ -7,10 +7,15 @@ tests/conftest.py.coverage
 poetry.lock
 # tests etc
 .coverage
+/test.sh
+.DS_Store
+
 
 # ide
 /.vscode/*
 /.idea/*
+/.continue/*
+/.claude/*
 
 
 # checkpoints
@@ -20,3 +25,9 @@ poetry.lock
 
 # plots
 /notebooks/plots/**
+
+# profiling: keep the rendered reports, not the raw run buffers
+/profiling/run/**
+
+# Jupyter auto-save copies -- never source (see pyproject ruff exclude)
+.ipynb_checkpoints/

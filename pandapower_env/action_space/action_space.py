@@ -4,6 +4,7 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+import pandapower.topology as top
 import pandas as pd
 
 from pandapower_env.action_space.substation_action_rules import (
@@ -59,39 +60,13 @@ def enforce_rules(
     :return: A filtered list of action dictionaries that satisfy all rules.
     :rtype: list[defaultdict[str, Any]]
     """
-    actions = []
-    for action in dict_actions:
-        substations: list[int] = action["substations"]
-        states: list[str] = action["states"]
-
-        all_subs_pass = True
-        for i_sub, hexset in zip(substations, states):  # only runs once for unitary actions
-
-            if not passes_two_bus_symmetry_rule(hexset):
-                all_subs_pass = False
-                break
-
-            if not passes_islanded_elements_rule(net.multi_bb_substation.loc[i_sub], hexset):
-                all_subs_pass = False
-                break
-
-            if not passes_n_elements_rule(hexset):
-                all_subs_pass = False
-                break
-
-        if not all_subs_pass:
-            continue
-
-        if not passes_fully_connected_grid_rule(net, substations, states):
-            continue
-
-        actions.append(action)
-    return actions
+    return [action for action in dict_actions if verify_action(net, action)]
 
 
 def verify_action(
     net: pandapowerNet,
     action: defaultdict[str, Any],
+    fast_ctx: dict | None = None,
 ) -> bool:
     """
     Verify that the action is valid.
@@ -100,6 +75,9 @@ def verify_action(
     :type net: pandapowerNet
     :param action: The action dictionary containing substations and states.
     :type action: defaultdict[str, Any]
+    :param fast_ctx: Optional context (see :func:`verify_all_actions`) that lets the
+        connectivity rule reuse a cached base graph instead of rebuilding it per action.
+    :type fast_ctx: dict | None
     :return: True if the action is valid, False otherwise.
     :rtype: bool
     """
@@ -115,7 +93,7 @@ def verify_action(
         if not passes_n_elements_rule(bitset):
             return False
 
-    return passes_fully_connected_grid_rule(net, substations, states)
+    return passes_fully_connected_grid_rule(net, substations, states, fast_ctx=fast_ctx)
 
 def create_actions_df(
     net: pandapowerNet,
@@ -133,14 +111,21 @@ def create_actions_df(
     """
     calculate_open_and_closed_switches(net, dict_actions)
 
-    df_actions = pd.DataFrame(
-        [{key: d.get(key, []) for key in d} for d in dict_actions],
-    )
+    # ``d.get(key, [])`` over ``d``'s own keys can never miss, so this is just ``dict(d)``.
+    df_actions = pd.DataFrame([dict(d) for d in dict_actions])
 
-    def replace_none_with_empty_list(x: list[Any]) -> list[Any]:
-        return [] if x is np.nan else x
+    # Actions that omit a column land as NaN and must become an empty list. Only the missing
+    # cells are visited: ``DataFrame.map`` called the replacement once per *cell*, which is
+    # n_actions x n_columns Python calls (~1.4M on case89).
+    missing = df_actions.isna()
+    for column in df_actions.columns:
+        rows = np.flatnonzero(missing[column].to_numpy())
+        if rows.size:
+            values = df_actions[column].to_numpy()
+            for row in rows:
+                values[row] = []
+            df_actions[column] = values
 
-    df_actions = df_actions.map(replace_none_with_empty_list)
     df_actions.index.name = None
     return df_actions
 
@@ -163,7 +148,7 @@ def create_unitary_substation_action(net: pandapowerNet) -> list[defaultdict[str
         zip(net.multi_bb_substation.index, connection_lengths, number_busbars),
     )
     for isub, connections, n_busbars in all_bus_connection_tuples:
-        actions = _create_unitary_substation_action_one_subs(
+        actions = create_unitary_substation_action_one_subs(
             n_connections=connections,
             bus=isub,
             number_busbars=n_busbars,
@@ -176,7 +161,7 @@ def create_unitary_substation_action(net: pandapowerNet) -> list[defaultdict[str
     return unitary_actions
 
 
-def _create_unitary_substation_action_one_subs(
+def create_unitary_substation_action_one_subs(
     n_connections: int,
     bus: int,
     number_busbars: int,
@@ -343,3 +328,26 @@ def add_actions_substation_line_pst(
         entry["action"] = action_counter
 
     return all_actions
+
+def verify_all_actions(net: pandapowerNet, actions: list[defaultdict[str, Any]]) -> list[defaultdict[str, Any]]:
+    """Use all rules on the start action set.
+
+    Builds an all-switches-closed base graph and a switch->edge map once and threads them
+    through ``verify_action`` so the connectivity rule reuses the base graph per action
+    instead of rebuilding the whole networkx graph for every one of (potentially many
+    thousands of) actions.
+    """
+    net.switch["closed"] = True
+    base_graph = top.create_nxgraph(net, respect_switches=True)
+    switch_edges = {
+        int(idx): (int(bus), int(element))
+        for idx, bus, element in zip(
+            net.switch.index, net.switch["bus"], net.switch["element"], strict=False,
+        )
+    }
+    fast_ctx = {"graph": base_graph, "switch_edges": switch_edges}
+
+    subset = [action for action in actions if verify_action(net, action, fast_ctx=fast_ctx)]
+    for new_id, action_dict in enumerate(subset):  # 🌈 assign new sequential index
+        action_dict["action"] = new_id
+    return subset

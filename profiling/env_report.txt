@@ -1,0 +1,66 @@
+Runtime 5.84s   Processes 1   Roles profile_env x1
+Host node4   Run 20260825T082453-9ef1a6
+Source a3536bcb (+dirty: 1 files, diff sha 427e3c)
+
+RESOURCES
+──────────────────────────────────────────────────────────────
+                            used     available      per proc
+CPU  peak              8.0 cores     120 cores          7.98
+CPU  mean              2.8 cores   (2% of box)          2.83
+RAM  peak RSS          1002.9 MB        2.0 TB     1002.9 MB
+
+  node4: 128 cores (120 available to this job), 2.0 TB RAM
+  per-proc figures are over 1 process(es) (profile_env x1)
+  heaviest process held 1002.9 MB RSS against a 1002.9 MB mean
+
+PROFILE_ENV  (1 process, imbalance 1.00)
+  % of phase wall time at the first branching level
+──────────────────────────────────────────────────────────────
+build_env                      87.3%         5.05s
+step_topology                   6.1%       353.0ms
+reset                           4.4%       253.9ms
+step_donothing                  1.7%        96.8ms
+warmup                          0.6%        32.4ms
+
+busy (phase open)              99.9%
+working (on CPU)               98.6%
+  busy = a phase was open; working = on a CPU inside one. The gap is waiting.
+
+DOMINANT PHASES          entries        self    wait       p50       p99
+build_env                      1       5.05s      1%     5.10s     5.36s
+step_topology                 10     353.0ms      1%    35.9ms    45.7ms
+reset                         11     253.9ms      3%    20.1ms    58.3ms
+step_donothing                 3      96.8ms      1%    32.5ms    33.5ms
+warmup                         1      32.4ms      1%    32.5ms    33.5ms
+
+RESETS  (11 entries)
+  mean     23.1ms   p50     20.1ms   p95     56.4ms   p99     58.3ms
+
+I/O
+──────────────────────────────────────────────────────────────
+Read (from disk)                       0 B           0 B/s
+Read (from page cache)            114.0 MB
+Write                                  0 B           0 B/s
+
+  build_env                 r        0 B   w        0 B  cache 114.0 MB
+
+  read                                                    peak 0 B/s
+  write                                                   peak 0 B/s
+
+  (bytes come from the OS process counters; attribution to a phase has a
+   resolution of one sample interval. Per-operation attribution needs eBPF.)
+
+GPU
+──────────────────────────────────────────────────────────────
+  No GPU data was collected. If this run used one, install nvidia-ml-py and
+  re-read the report without --no-samples; a phase around device work reports
+  submission time until something proves the device was busy.
+
+MEMORY (RSS)
+──────────────────────────────────────────────────────────────
+Current                          1002.9 MB
+Peak                             1002.9 MB
+Growth over run                   306.3 MB
+Trend                            45.7 MB/s
+
+  growing under build_env                    56.0 MB/s

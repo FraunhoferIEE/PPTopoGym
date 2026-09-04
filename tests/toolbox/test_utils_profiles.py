@@ -1,4 +1,6 @@
 import pandas as pd
+import pytest
+import simbench
 
 from pandapower_env.toolbox.utils_profiles import (
     _add_column_names,
@@ -116,3 +118,47 @@ def test_setup_profiles(test_grid_multi_bb_substations) -> None:
     # Check if the sgens were added correctly
     for out in outputs:
         assert isinstance(out, pd.DataFrame), "Error: output is not a DataFrame!"
+
+
+def test_add_column_names_ceiling_is_documented_and_enforced() -> None:
+    """Pin the grid-size ceiling imposed by positional Simbench profile assignment.
+
+    ``_add_column_names`` assigns one distinct Simbench profile per element positionally,
+    so a grid cannot carry more loads than the library has distinct load profiles. On
+    ``sb_index`` 0-2 that is 96; on 3-5 it is 27. This is why ``case118`` (99 loads) and
+    ``case300`` (193 loads) cannot be built at all -- see the cycle-4 section of
+    ``profiling/PERF_LEDGER.md``.
+
+    The test documents the limit rather than asserting an exact catalogue size, so a
+    Simbench upgrade that ships more profiles relaxes it instead of breaking the suite.
+    """
+    import pandapower.networks as pn
+
+    net = pn.case118()
+    n_available = _count_unique_load_profiles(sb_index=2)
+
+    assert len(net.load) > n_available, (
+        "case118 is expected to exceed the positional profile ceiling; if Simbench now "
+        f"ships >= {len(net.load)} load profiles this limit has been relaxed."
+    )
+
+    # The failure today is a raw pandas length error from the positional assignment.
+    with pytest.raises(ValueError, match="Length of values"):
+        get_first_sb_profiles(net, 2)
+
+
+def _count_unique_load_profiles(sb_index: int) -> int:
+    """Count distinct load profiles the Simbench library offers for one scenario index.
+
+    Mirrors the de-duplication ``_add_column_names`` performs (``_pload``/``_qload``
+    suffixes collapse to one profile), so the count is the number of loads that can
+    actually be assigned.
+
+    :param sb_index: Simbench scenario index.
+    :return: Number of distinct load profile names.
+    """
+    profiles = simbench.get_all_simbench_profiles(sb_index)
+    names = profiles["load"].columns[1:].to_series().apply(
+        lambda x: x.replace("_pload", "").replace("_qload", ""),
+    )
+    return int(len(names.unique()))

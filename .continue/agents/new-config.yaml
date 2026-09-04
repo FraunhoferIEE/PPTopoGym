@@ -1,0 +1,40 @@
+name: FhGenie Config
+version: 1.0.0
+schema: v1
+
+models:
+  - name: Qwen3 Coder (FhGenie)
+    provider: openai
+    model: Qwen/Qwen3-Coder-Next-FP8
+    apiBase: https://fhgenie.fraunhofer.de//v1
+    apiKey: mPGxeuZgXZ3N8XEbeyvvrXnpX57gjRgj
+
+  - name: MiniMax M2.5 (FhGenie)
+    provider: openai
+    model: MiniMaxAI/MiniMax-M2.5
+    apiBase: https://fhgenie.fraunhofer.de//v1
+    apiKey: mPGxeuZgXZ3N8XEbeyvvrXnpX57gjRgj
+  
+  - name: Claude 4.6 (FHGenie)
+    provider: openai
+    model: eu.anthropic.claude-opus-4-6-v1
+    piBase: https://fhgenie.fraunhofer.de//v1
+    apiKey: mPGxeuZgXZ3N8XEbeyvvrXnpX57gjRgj
+
+
+tabAutocompleteModel:
+  name: Qwen3 Coder Autocomplete
+  provider: openai
+  model: Qwen/Qwen3-Coder-Next-FP8
+  apiBase: https://fhgenie.fraunhofer.de//v1
+  apiKey: mPGxeuZgXZ3N8XEbeyvvrXnpX57gjRgj
+
+# This is the correct, stable way to write MCP configurations in Continue
+mcpServers:
+  - name: filesystem
+    provider: command
+    command: npx
+    args:
+      - "-y"
+      - "@modelcontextprotocol/server-filesystem"
+      - "/path/to/your/allowed/directory"  # Change this to a folder you want the AI to access

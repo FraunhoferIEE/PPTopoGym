@@ -1,0 +1,1155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lineprofiler trace</title>
+<style>
+:root {
+  --bg: #ffffff; --fg: #1a1a1a; --muted: #6a6a6a; --rule: #e3e3e3;
+  --panel: #fafafa; --accent: #b23c17; --cool: #2f6f9f;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16181a; --fg: #e8e6e3; --muted: #9a9a9a; --rule: #2c2f33;
+    --panel: #1d2023; --accent: #ff7a4d; --cool: #6fb3e0;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 2rem 1.5rem 4rem; background: var(--bg); color: var(--fg);
+  font: 14px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, sans-serif;
+}
+main { max-width: 78rem; margin: 0 auto; }
+h1 { font-size: 1.4rem; font-weight: 600; margin: 0 0 .2rem; letter-spacing: -.01em; }
+h2 {
+  font-size: .8rem; font-weight: 600; text-transform: uppercase; letter-spacing: .09em;
+  color: var(--muted); margin: 2.4rem 0 .7rem; padding-bottom: .35rem;
+  border-bottom: 1px solid var(--rule);
+}
+.sub { color: var(--muted); margin: 0 0 .4rem; }
+.note { color: var(--muted); font-size: .85rem; margin: .5rem 0 0; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { text-align: right; padding: .3rem .5rem; border-bottom: 1px solid var(--rule); }
+th:first-child, td:first-child { text-align: left; }
+th {
+  font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+  font-weight: 600;
+}
+code, .mono, pre {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.tiles { display: flex; flex-wrap: wrap; gap: .6rem; margin: .2rem 0 0; }
+.tile {
+  background: var(--panel); border: 1px solid var(--rule); border-radius: 6px;
+  padding: .55rem .8rem; min-width: 8.5rem;
+}
+.tile .k {
+  font-size: .68rem; text-transform: uppercase; letter-spacing: .07em; color: var(--muted);
+}
+.tile .v { font-size: 1.05rem; font-variant-numeric: tabular-nums; }
+.scroll { overflow-x: auto; }
+svg { display: block; max-width: 100%; height: auto; }
+</style>
+<style>
+.findings { list-style: none; counter-reset: finding; margin: 0; padding: 0; }
+.finding {
+  counter-increment: finding; position: relative; background: var(--panel);
+  border: 1px solid var(--rule); border-left: 3px solid var(--accent); border-radius: 6px;
+  padding: .7rem .9rem .7rem 2.6rem; margin: 0 0 .5rem;
+}
+.finding::before {
+  content: counter(finding); position: absolute; left: .9rem; top: .7rem;
+  font-variant-numeric: tabular-nums; font-weight: 600; color: var(--accent);
+}
+.finding .claim { font-weight: 600; }
+.finding .why { color: var(--muted); font-size: .87rem; margin-top: .2rem; }
+.finding .act:not(:empty) { margin-top: .45rem; }
+.finding[data-kind="idle-lane"] { border-left-color: var(--cool); }
+.finding[data-kind="idle-lane"]::before { color: var(--cool); }
+.tl-jump {
+  font: inherit; font-size: .78rem; padding: .2rem .55rem; cursor: pointer;
+  background: var(--bg); color: var(--fg); border: 1px solid var(--rule); border-radius: 5px;
+}
+.tl-jump:hover { border-color: var(--accent); color: var(--accent); }
+.barcell { min-width: 9rem; }
+.bar {
+  display: inline-block; height: .62rem; border-radius: 2px; vertical-align: middle;
+  min-width: 2px;
+}
+.barnum { color: var(--muted); font-size: .78rem; margin-left: .4rem; }
+.tl-legend {
+  display: flex; flex-wrap: wrap; gap: .5rem 1.1rem; margin: 0 0 .7rem;
+  font-size: .8rem; color: var(--muted);
+}
+.tl-legend .key { display: inline-flex; align-items: center; gap: .35rem; }
+.tl-legend .sw {
+  display: inline-block; width: .95rem; height: .62rem; border-radius: 2px;
+}
+.tl-legend .grad {
+  background: linear-gradient(90deg, rgb(178,60,23), rgb(47,111,159)); width: 2.4rem;
+}
+.tl-legend .hatch {
+  background: repeating-linear-gradient(
+    45deg, var(--muted) 0 1px, transparent 1px 4px
+  );
+  border: 1px solid var(--rule);
+}
+.tl-legend .crit { background: transparent; border: 2px solid var(--accent); }
+.tl-legend .arrow { background: var(--cool); height: 2px; border-radius: 0; }
+#tl-focus:not(:empty) {
+  background: var(--panel); border: 1px solid var(--rule); border-radius: 6px;
+  padding: .5rem .7rem; margin-top: .5rem;
+}
+#tl-focus .lead { color: var(--fg); font-weight: 600; }
+.tl-controls { display: flex; gap: .6rem; align-items: center; margin: 0 0 .6rem; }
+.tl-controls button {
+  font: inherit; font-size: .8rem; padding: .25rem .6rem; cursor: pointer;
+  background: var(--panel); color: var(--fg); border: 1px solid var(--rule);
+  border-radius: 5px;
+}
+.tl-controls button:hover { border-color: var(--muted); }
+.tl-controls button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+#tl-wrap { position: relative; border: 1px solid var(--rule); border-radius: 6px; }
+#tl-canvas { display: block; width: 100%; cursor: grab; }
+#tl-canvas.dragging { cursor: grabbing; }
+#tl-tip {
+  position: absolute; pointer-events: none; z-index: 5; max-width: 26rem;
+  background: var(--bg); color: var(--fg); border: 1px solid var(--rule);
+  border-radius: 5px; padding: .4rem .55rem; font-size: .8rem; line-height: 1.4;
+  box-shadow: 0 2px 10px rgba(0,0,0,.18); font-variant-numeric: tabular-nums;
+}
+#tl-tip .p { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+#tl-tip .crit { color: var(--accent); font-weight: 600; }
+#tl-tip .src, #tl-focus .src {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .75rem; color: var(--muted); word-break: break-all;
+}
+/* The same location line inside a table cell: secondary to the phase name above it, so it
+   reads as an annotation on that row rather than as another column. */
+td .src {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .72rem; color: var(--muted); font-weight: 400; margin-top: .1rem;
+}
+</style>
+</head>
+<body>
+<main>
+<h1>lineprofiler trace</h1>
+<p class="sub mono">run 20260825T082453-9ef1a6 · Source a3536bcb (+dirty: 1 files, diff sha 427e3c)</p>
+<div class="tiles"><div class="tile"><div class="k">traced span</div><div class="v">5.80s</div></div><div class="tile"><div class="k">lanes</div><div class="v">1</div></div><div class="tile"><div class="k">spans</div><div class="v">26</div></div><div class="tile"><div class="k">arrows</div><div class="v">0</div></div><div class="tile"><div class="k">waiting</div><div class="v">1%</div></div></div>
+<p class="note">“traced span” is first span to last, which is shorter than the run's wall clock: a worker starts before its first phase and ends after its last.</p>
+<h2>Findings</h2>
+<p class="note">No lane was idle for a large share of the run, no phase spent most of its time blocked, and no single lane dominated. There is no obvious bottleneck to name — the timeline below is still worth reading for the shape of the run.</p>
+<h2>Phase summary</h2>
+<p class="note">Every phase by total wall time across all lanes. “self” excludes time spent inside nested phases, so a wrapper does not out-rank the callee that spent the time. Bar colour is the share of the phase spent blocked.</p>
+<div class="scroll"><table><thead><tr><th>phase</th><th>calls</th><th>lanes</th><th>wall</th><th>self</th><th>blocked</th><th>share of run</th></tr></thead><tbody><tr><td class="mono">build_env</td><td>1</td><td>1</td><td>5.05s</td><td>5.05s</td><td>1%</td><td class="barcell"><span class="bar" style="width:100.0%;background:rgb(176,61,25)"></span><span class="barnum">87.2%</span></td></tr><tr><td class="mono">step_topology</td><td>10</td><td>1</td><td>353.0ms</td><td>353.0ms</td><td>1%</td><td class="barcell"><span class="bar" style="width:7.0%;background:rgb(177,60,24)"></span><span class="barnum">6.1%</span></td></tr><tr><td class="mono">reset</td><td>11</td><td>1</td><td>253.9ms</td><td>253.9ms</td><td>3%</td><td class="barcell"><span class="bar" style="width:5.0%;background:rgb(174,61,27)"></span><span class="barnum">4.4%</span></td></tr><tr><td class="mono">step_donothing</td><td>3</td><td>1</td><td>96.8ms</td><td>96.8ms</td><td>1%</td><td class="barcell"><span class="bar" style="width:1.9%;background:rgb(177,60,24)"></span><span class="barnum">1.7%</span></td></tr><tr><td class="mono">warmup</td><td>1</td><td>1</td><td>32.4ms</td><td>32.4ms</td><td>1%</td><td class="barcell"><span class="bar" style="width:0.6%;background:rgb(177,60,24)"></span><span class="barnum">0.6%</span></td></tr></tbody></table></div>
+<h2>Timeline</h2>
+<p class="note">One row per worker thread, all on the same clock. Each bar is one call; its width is wall time and its colour is how much of that time was spent blocked rather than running. A gap is a lane with nothing open at all.</p>
+<div class="tl-legend"><span class="key"><i class="sw" style="background:rgb(178,60,23)"></i>on CPU</span><span class="key"><i class="sw" style="background:rgb(47,111,159)"></i>blocked</span><span class="key"><i class="sw grad"></i>the blend between them</span><span class="key"><i class="sw hatch"></i>CPU not measured</span><span class="key"><i class="sw crit"></i>critical path</span><span class="key"><i class="sw arrow"></i>signal → the wait it released</span></div>
+<div class="tl-controls"><button type="button" id="tl-reset">reset zoom</button><button type="button" id="tl-critical" aria-pressed="false">only the critical path</button><button type="button" id="tl-brush" aria-pressed="false">measure a range</button><span class="note" id="tl-range"></span></div>
+<div id="tl-wrap"><canvas id="tl-canvas"></canvas><div id="tl-tip" hidden></div></div>
+<div class="note" id="tl-selection"></div>
+<div class="note" id="tl-focus"></div>
+<p class="note"><strong>Drag</strong> to pan · <strong>scroll</strong> to zoom · <strong>hover</strong> for the exact figures · <strong>click a span</strong> to pin it: everything not causally upstream of it dims, and the panel names who released it · <strong>click it again</strong> to unpin. <strong>Click a lane's label</strong> to fold it to a single row — its spans stay drawn, they just stop claiming a row each. “Measure a range” answers what every lane was doing over a window you drag — the difference between a stall and a queue.</p>
+<p class="note">With the chart focused: <span class="mono">← →</span> pan · <span class="mono">+ −</span> zoom · <span class="mono">n p</span> step along the critical path · <span class="mono">0</span> reset · <span class="mono">Esc</span> unpin.</p>
+<h2>Critical path</h2>
+<div class="scroll"><table><thead><tr><th>worker</th><th>phase</th><th>duration</th><th>wait</th><th>gap</th></tr></thead><tbody><tr><td>rank 0 (node4)</td><td>step_donothing</td><td>31.9ms</td><td>1%</td><td></td></tr><tr><td>rank 0 (node4)</td><td>step_donothing</td><td>33.1ms</td><td>1%</td><td>60.4us idle after</td></tr><tr><td>rank 0 (node4)</td><td>step_donothing</td><td>31.8ms</td><td>1%</td><td>25.1us idle after</td></tr><tr><td>rank 0 (node4)</td><td>reset</td><td>19.6ms</td><td>1%</td><td>41.5us idle after</td></tr><tr><td>rank 0 (node4)</td><td>step_topology</td><td>34.3ms</td><td>1%</td><td>23.6us idle after</td></tr><tr><td>rank 0 (node4)</td><td>reset</td><td>19.5ms</td><td>1%</td><td>21.0us idle after</td></tr><tr><td>rank 0 (node4)</td><td>step_topology</td><td>34.0ms</td><td>1%</td><td>21.2us idle after</td></tr><tr><td>rank 0 (node4)</td><td>reset</td><td>19.5ms</td><td>1%</td><td>21.2us idle after</td></tr><tr><td>rank 0 (node4)</td><td>step_topology</td><td>34.5ms</td><td>1%</td><td>21.5us idle after</td></tr><tr><td>rank 0 (node4)</td><td>reset</td><td>19.6ms</td><td>1%</td><td>21.5us idle after</td></tr><tr><td>rank 0 (node4)</td><td>step_topology</td><td>34.1ms</td><td>1%</td><td>21.5us idle after</td></tr><tr><td>rank 0 (node4)</td><td>reset</td><td>19.6ms</td><td>1%</td><td>20.7us idle after</td></tr><tr><td>rank 0 (node4)</td><td>step_topology</td><td>34.2ms</td><td>1%</td><td>22.8us idle after</td></tr><tr><td>rank 0 (node4)</td><td>reset</td><td>19.6ms</td><td>1%</td><td>21.8us idle after</td></tr><tr><td>rank 0 (node4)</td><td>step_topology</td><td>34.4ms</td><td>1%</td><td>22.3us idle after</td></tr><tr><td>rank 0 (node4)</td><td>reset</td><td>19.7ms</td><td>1%</td><td>21.0us idle after</td></tr><tr><td>rank 0 (node4)</td><td>step_topology</td><td>34.6ms</td><td>1%</td><td>21.8us idle after</td></tr><tr><td>rank 0 (node4)</td><td>reset</td><td>21.1ms</td><td>1%</td><td>23.6us idle after</td></tr><tr><td>rank 0 (node4)</td><td>step_topology</td><td>44.5ms</td><td>1%</td><td>39.4us idle after</td></tr><tr><td>rank 0 (node4)</td><td>reset</td><td>20.6ms</td><td>1%</td><td>21.2us idle after</td></tr><tr><td>rank 0 (node4)</td><td>step_topology</td><td>34.8ms</td><td>1%</td><td>42.0us idle after</td></tr><tr><td>rank 0 (node4)</td><td>reset</td><td>18.8ms</td><td>1%</td><td>21.8us idle after</td></tr><tr><td>rank 0 (node4)</td><td>step_topology</td><td>33.6ms</td><td>1%</td><td>24.6us idle after</td></tr><tr><td>rank 0 (node4)</td><td>reset</td><td>56.3ms</td><td>11%</td><td>305.9us idle after</td></tr><tr><td>rank 0 (node4)</td><td>warmup</td><td>32.4ms</td><td>1%</td><td>1.9ms idle after</td></tr><tr><td>rank 0 (node4)</td><td>build_env</td><td>5.05s</td><td>1%</td><td>2.1ms idle after</td></tr></tbody></table></div>
+<p class="note">Read bottom to top: each row had to finish before the one above it could start. No signal/wait_on pairs were recorded, so this chain follows each lane's own order only — it cannot yet cross between workers.</p>
+<h2>Lanes</h2>
+<div class="scroll"><table><thead><tr><th>lane</th><th>role</th><th>phase open</th><th>on CPU</th><th>blocked</th></tr></thead><tbody><tr><td>rank 0 (node4)#0</td><td>profile_env</td><td>99.9%</td><td>98.6%</td><td>1.3%</td></tr></tbody></table></div>
+<p class="note">“phase open” counts a lane blocked in a queue as occupied; “on CPU” does not. The difference is the waiting.</p>
+<h2>Call order</h2>
+<p class="note">Each lane in the order it ran, indentation showing what was called from inside what. Read down for the sequence, right for the nesting.</p>
+<h3>rank 0 (node4)#0 <span class="note">profile_env</span></h3>
+<div class="scroll"><table><thead><tr><th>#</th><th>call</th><th>at</th><th>duration</th><th>wait</th></tr></thead><tbody><tr><td class="mono">0</td><td class="mono">build_env</td><td>0ns</td><td>5.05s</td><td>1%</td></tr><tr><td class="mono">0</td><td class="mono">warmup</td><td>5.06s</td><td>32.4ms</td><td>1%</td></tr><tr><td class="mono">0</td><td class="mono">reset</td><td>5.09s</td><td>56.3ms</td><td>11%</td></tr><tr><td class="mono">0</td><td class="mono">step_topology</td><td>5.15s</td><td>33.6ms</td><td>1%</td></tr><tr><td class="mono">0</td><td class="mono">reset</td><td>5.18s</td><td>18.8ms</td><td>1%</td></tr><tr><td class="mono">0</td><td class="mono">step_topology</td><td>5.20s</td><td>34.8ms</td><td>1%</td></tr><tr><td class="mono">0</td><td class="mono">reset</td><td>5.24s</td><td>20.6ms</td><td>1%</td></tr><tr><td class="mono">0</td><td class="mono">step_topology</td><td>5.26s</td><td>44.5ms</td><td>1%</td></tr><tr><td class="mono">0</td><td class="mono">reset</td><td>5.30s</td><td>21.1ms</td><td>1%</td></tr><tr><td class="mono">0</td><td class="mono">step_topology</td><td>5.32s</td><td>34.6ms</td><td>1%</td></tr><tr><td class="mono">0</td><td class="mono">reset</td><td>5.36s</td><td>19.7ms</td><td>1%</td></tr><tr><td class="mono">0</td><td class="mono">step_topology</td><td>5.38s</td><td>34.4ms</td><td>1%</td></tr><tr><td class="mono">0</td><td class="mono">reset</td><td>5.41s</td><td>19.6ms</td><td>1%</td></tr><tr><td class="mono">0</td><td class="mono">step_topology</td><td>5.43s</td><td>34.2ms</td><td>1%</td></tr><tr><td class="mono">0</td><td class="mono">reset</td><td>5.46s</td><td>19.6ms</td><td>1%</td></tr><tr><td class="mono">0</td><td class="mono">step_topology</td><td>5.48s</td><td>34.1ms</td><td>1%</td></tr><tr><td class="mono">0</td><td class="mono">reset</td><td>5.52s</td><td>19.6ms</td><td>1%</td></tr><tr><td class="mono">0</td><td class="mono">step_topology</td><td>5.54s</td><td>34.5ms</td><td>1%</td></tr><tr><td class="mono">0</td><td class="mono">reset</td><td>5.57s</td><td>19.5ms</td><td>1%</td></tr><tr><td class="mono">0</td><td class="mono">step_topology</td><td>5.59s</td><td>34.0ms</td><td>1%</td></tr><tr><td class="mono">0</td><td class="mono">reset</td><td>5.63s</td><td>19.5ms</td><td>1%</td></tr><tr><td class="mono">0</td><td class="mono">step_topology</td><td>5.64s</td><td>34.3ms</td><td>1%</td></tr><tr><td class="mono">0</td><td class="mono">reset</td><td>5.68s</td><td>19.6ms</td><td>1%</td></tr><tr><td class="mono">0</td><td class="mono">step_donothing</td><td>5.70s</td><td>31.8ms</td><td>1%</td></tr><tr><td class="mono">0</td><td class="mono">step_donothing</td><td>5.73s</td><td>33.1ms</td><td>1%</td></tr><tr><td class="mono">0</td><td class="mono">step_donothing</td><td>5.76s</td><td>31.9ms</td><td>1%</td></tr></tbody></table></div>
+<h2>Caveats</h2>
+<ul><li>All workers ran on one host, so the shared time axis is exact: every process read the same clocks.</li></ul>
+</main>
+<script type="application/json" id="lineprofiler-data">{
+  "run_id": "20260825T082453-9ef1a6",
+  "duration_us": 5795859.968,
+  "omitted": 0,
+  "lanes": [
+    {
+      "id": "rank 0 (node4)#0",
+      "role": "profile_env",
+      "busy": 99.9,
+      "working": 98.6,
+      "rows": 1
+    }
+  ],
+  "spans": [
+    {
+      "l": 0,
+      "n": "build_env",
+      "t": 0.0,
+      "d": 5054802.944,
+      "w": 1.3,
+      "y": 0,
+      "a": 0,
+      "c": 1,
+      "o": -1
+    },
+    {
+      "l": 0,
+      "n": "warmup",
+      "t": 5056911.104,
+      "d": 32440.576,
+      "w": 0.8,
+      "y": 0,
+      "a": 0,
+      "c": 1,
+      "o": -1
+    },
+    {
+      "l": 0,
+      "n": "reset",
+      "t": 5091241.984,
+      "d": 56298.24,
+      "w": 10.6,
+      "y": 0,
+      "a": 0,
+      "c": 1,
+      "o": -1
+    },
+    {
+      "l": 0,
+      "n": "step_topology",
+      "t": 5147846.144,
+      "d": 33611.776,
+      "w": 0.8,
+      "y": 0,
+      "a": 0,
+      "c": 1,
+      "o": -1
+    },
+    {
+      "l": 0,
+      "n": "reset",
+      "t": 5181482.496,
+      "d": 18752.512,
+      "w": 0.6,
+      "y": 0,
+      "a": 0,
+      "c": 1,
+      "o": -1
+    },
+    {
+      "l": 0,
+      "n": "step_topology",
+      "t": 5200256.768,
+      "d": 34839.552,
+      "w": 0.7,
+      "y": 0,
+      "a": 0,
+      "c": 1,
+      "o": -1
+    },
+    {
+      "l": 0,
+      "n": "reset",
+      "t": 5235138.304,
+      "d": 20648.192,
+      "w": 0.7,
+      "y": 0,
+      "a": 0,
+      "c": 1,
+      "o": -1
+    },
+    {
+      "l": 0,
+      "n": "step_topology",
+      "t": 5255807.744,
+      "d": 44482.304,
+      "w": 0.7,
+      "y": 0,
+      "a": 0,
+      "c": 1,
+      "o": -1
+    },
+    {
+      "l": 0,
+      "n": "reset",
+      "t": 5300329.472,
+      "d": 21096.448,
+      "w": 0.7,
+      "y": 0,
+      "a": 0,
+      "c": 1,
+      "o": -1
+    },
+    {
+      "l": 0,
+      "n": "step_topology",
+      "t": 5321449.472,
+      "d": 34568.448,
+      "w": 0.7,
+      "y": 0,
+      "a": 0,
+      "c": 1,
+      "o": -1
+    },
+    {
+      "l": 0,
+      "n": "reset",
+      "t": 5356039.68,
+      "d": 19728.896,
+      "w": 0.6,
+      "y": 0,
+      "a": 0,
+      "c": 1,
+      "o": -1
+    },
+    {
+      "l": 0,
+      "n": "step_topology",
+      "t": 5375789.568,
+      "d": 34387.456,
+      "w": 0.6,
+      "y": 0,
+      "a": 0,
+      "c": 1,
+      "o": -1
+    },
+    {
+      "l": 0,
+      "n": "reset",
+      "t": 5410199.296,
+      "d": 19583.744,
+      "w": 0.6,
+      "y": 0,
+      "a": 0,
+      "c": 1,
+      "o": -1
+    },
+    {
+      "l": 0,
+      "n": "step_topology",
+      "t": 5429804.8,
+      "d": 34243.328,
+      "w": 0.6,
+      "y": 0,
+      "a": 0,
+      "c": 1,
+      "o": -1
+    },
+    {
+      "l": 0,
+      "n": "reset",
+      "t": 5464070.912,
+      "d": 19625.984,
+      "w": 0.6,
+      "y": 0,
+      "a": 0,
+      "c": 1,
+      "o": -1
+    },
+    {
+      "l": 0,
+      "n": "step_topology",
+      "t": 5483717.632,
+      "d": 34120.192,
+      "w": 0.6,
+      "y": 0,
+      "a": 0,
+      "c": 1,
+      "o": -1
+    },
+    {
+      "l": 0,
+      "n": "reset",
+      "t": 5517859.328,
+      "d": 19577.344,
+      "w": 0.6,
+      "y": 0,
+      "a": 0,
+      "c": 1,
+      "o": -1
+    },
+    {
+      "l": 0,
+      "n": "step_topology",
+      "t": 5537458.176,
+      "d": 34479.616,
+      "w": 0.6,
+      "y": 0,
+      "a": 0,
+      "c": 1,
+      "o": -1
+    },
+    {
+      "l": 0,
+      "n": "reset",
+      "t": 5571959.296,
+      "d": 19495.168,
+      "w": 0.6,
+      "y": 0,
+      "a": 0,
+      "c": 1,
+      "o": -1
+    },
+    {
+      "l": 0,
+      "n": "step_topology",
+      "t": 5591475.712,
+      "d": 33999.104,
+      "w": 0.6,
+      "y": 0,
+      "a": 0,
+      "c": 1,
+      "o": -1
+    },
+    {
+      "l": 0,
+      "n": "reset",
+      "t": 5625496.064,
+      "d": 19462.4,
+      "w": 0.6,
+      "y": 0,
+      "a": 0,
+      "c": 1,
+      "o": -1
+    },
+    {
+      "l": 0,
+      "n": "step_topology",
+      "t": 5644979.456,
+      "d": 34288.896,
+      "w": 0.6,
+      "y": 0,
+      "a": 0,
+      "c": 1,
+      "o": -1
+    },
+    {
+      "l": 0,
+      "n": "reset",
+      "t": 5679291.904,
+      "d": 19642.624,
+      "w": 0.6,
+      "y": 0,
+      "a": 0,
+      "c": 1,
+      "o": -1
+    },
+    {
+      "l": 0,
+      "n": "step_donothing",
+      "t": 5698976.0,
+      "d": 31800.576,
+      "w": 0.6,
+      "y": 0,
+      "a": 0,
+      "c": 1,
+      "o": -1
+    },
+    {
+      "l": 0,
+      "n": "step_donothing",
+      "t": 5730801.664,
+      "d": 33088.256,
+      "w": 0.6,
+      "y": 0,
+      "a": 0,
+      "c": 1,
+      "o": -1
+    },
+    {
+      "l": 0,
+      "n": "step_donothing",
+      "t": 5763950.336,
+      "d": 31909.632,
+      "w": 0.6,
+      "y": 0,
+      "a": 0,
+      "c": 1,
+      "o": -1
+    }
+  ],
+  "origins": [],
+  "arrows": [],
+  "gpu": []
+}</script>
+<script>
+(function () {
+  var el = document.getElementById('tl-canvas');
+  if (!el) { return; }
+  var raw = document.getElementById('lineprofiler-data');
+  if (!raw) { return; }
+  var data = JSON.parse(raw.textContent.replace(/<\\\//g, '</'));
+  var spans = data.spans || [], lanes = data.lanes || [], arrows = data.arrows || [];
+  var origins = data.origins || [];
+  var gpu = data.gpu || [];
+  if (!spans.length) { return; }
+
+  var ctx = el.getContext('2d');
+  var tip = document.getElementById('tl-tip');
+  var wrap = document.getElementById('tl-wrap');
+  var rangeLabel = document.getElementById('tl-range');
+  var ROW_H = 15, LANE_PAD = 8, PAD_L = 132, PAD_T = 26, GPU_H = 34;
+  var total = data.duration_us || 1;
+  var view = { t0: 0, t1: total };
+  var onlyCritical = false, hover = null, focus = null, chain = null;
+  var brushing = false, brushFrom = null, brushTo = null;
+  var selectionLabel = document.getElementById('tl-selection');
+  var focusPanel = document.getElementById('tl-focus');
+
+  // Each lane is as tall as it is deep: one row per nesting level, so a callee is drawn
+  // under its caller instead of over it. Every y on the page reads these tables.
+  //
+  // Recomputed rather than computed once, because a lane can now be collapsed: with sixteen
+  // actors the chart is taller than any screen and the reader cannot see the learner and an
+  // actor at the same time, which is exactly the comparison they opened it to make. A
+  // collapsed lane keeps its slot and its spans — they fold onto one row — so collapsing
+  // never hides activity, it only stops giving it a row of its own.
+  var laneTop = [], laneH = [], lanesBottom = PAD_T;
+  var collapsed = {};
+  function layout() {
+    lanesBottom = PAD_T;
+    for (var li = 0; li < lanes.length; li++) {
+      var rows = collapsed[li] ? 1 : (lanes[li].rows || 1);
+      laneTop[li] = lanesBottom;
+      laneH[li] = rows * ROW_H + LANE_PAD;
+      lanesBottom += laneH[li];
+    }
+  }
+  layout();
+
+  // Which row a span lands on: its own depth normally, row 0 when its lane is folded.
+  function rowOf(sp) {
+    return collapsed[sp.l] ? 0 : (sp.y || 0);
+  }
+
+  function css(name) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+  function height() {
+    return lanesBottom + gpu.length * GPU_H + 18;
+  }
+  function resize() {
+    var ratio = window.devicePixelRatio || 1;
+    var width = wrap.clientWidth;
+    el.width = width * ratio; el.height = height() * ratio;
+    el.style.height = height() + 'px';
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    draw();
+  }
+  function xOf(t, width) {
+    return PAD_L + (t - view.t0) / (view.t1 - view.t0) * (width - PAD_L - 10);
+  }
+  function tOf(x, width) {
+    return view.t0 + (x - PAD_L) / (width - PAD_L - 10) * (view.t1 - view.t0);
+  }
+
+  // The same blend the icicle chart uses, so the two pages agree on what colour means.
+  function waitColour(w) {
+    if (w < 0) { return null; }
+    var f = Math.max(0, Math.min(1, w / 100));
+    var r = Math.round(0xB2 + (0x2F - 0xB2) * f);
+    var g = Math.round(0x3C + (0x6F - 0x3C) * f);
+    var b = Math.round(0x17 + (0x9F - 0x17) * f);
+    return 'rgb(' + r + ',' + g + ',' + b + ')';
+  }
+  // The only way text reaches the page: textContent never parses markup, so a phase name is
+  // always shown rather than interpreted.
+  function named(tag, cls, text) {
+    var node = document.createElement(tag);
+    if (cls) { node.className = cls; }
+    node.textContent = text;
+    return node;
+  }
+
+  // Spans index into the origin table rather than carrying a path each: the same function
+  // appears in thousands of them. -1, and any index the table does not hold, means no
+  // location was recorded — a named phase has no code object behind it.
+  function originOf(sp) {
+    var at = sp.o;
+    if (at === undefined || at < 0 || at >= origins.length) { return null; }
+    return origins[at];
+  }
+
+  function fmt(us) {
+    if (us < 1) { return (us * 1000).toFixed(0) + ' ns'; }
+    if (us < 1000) { return us.toFixed(1) + ' µs'; }
+    if (us < 1e6) { return (us / 1000).toFixed(2) + ' ms'; }
+    return (us / 1e6).toFixed(2) + ' s';
+  }
+
+  function draw() {
+    var width = wrap.clientWidth;
+    ctx.clearRect(0, 0, width, height());
+    ctx.font = '11px ui-sans-serif, system-ui, sans-serif';
+    ctx.textBaseline = 'middle';
+    var rule = css('--rule'), muted = css('--muted'), fg = css('--fg');
+
+    drawAxis(width, muted, rule);
+    for (var i = 0; i < lanes.length; i++) { drawLaneLabel(i, width, fg, muted, rule); }
+    for (var s = 0; s < spans.length; s++) { drawSpan(spans[s], width); }
+    drawArrows(width);
+    drawGpu(width, muted, rule);
+    drawBrush(width, fg);
+    rangeLabel.textContent = fmt(view.t1 - view.t0) + ' shown of ' + fmt(total);
+  }
+
+  function drawBrush(width, fg) {
+    if (brushFrom === null || brushTo === null) { return; }
+    var x0 = xOf(Math.min(brushFrom, brushTo), width);
+    var x1 = xOf(Math.max(brushFrom, brushTo), width);
+    if (x1 - x0 < 1) { return; }
+    // Drawn last so it sits over the spans it selects, and translucent so they stay readable:
+    // the point is to say which spans are included, not to hide them.
+    ctx.save();
+    ctx.globalAlpha = 0.18;
+    ctx.fillStyle = fg;
+    ctx.fillRect(x0, PAD_T, x1 - x0, lanesBottom - PAD_T);
+    ctx.restore();
+    ctx.strokeStyle = fg; ctx.lineWidth = 1;
+    ctx.strokeRect(x0 + 0.5, PAD_T + 0.5, x1 - x0 - 1, lanesBottom - PAD_T - 1);
+  }
+
+  function describeSelection() {
+    var from = Math.min(brushFrom, brushTo), to = Math.max(brushFrom, brushTo);
+    var window = to - from;
+    if (window <= 0) { selectionLabel.textContent = ''; return; }
+
+    // Union per lane, so a lane whose phases nest cannot exceed 100% of the window.
+    var byLane = {};
+    for (var i = 0; i < spans.length; i++) {
+      var sp = spans[i];
+      var lo = Math.max(sp.t, from), hi = Math.min(sp.t + sp.d, to);
+      if (hi <= lo) { continue; }
+      var name = lanes[sp.l] ? lanes[sp.l].id : String(sp.l);
+      if (!byLane[name]) { byLane[name] = []; }
+      byLane[name].push([lo, hi]);
+    }
+
+    var parts = [];
+    for (var lane in byLane) {
+      if (!Object.prototype.hasOwnProperty.call(byLane, lane)) { continue; }
+      parts.push([lane, 100 * covered(byLane[lane]) / window]);
+    }
+    parts.sort(function (a, b) { return b[1] - a[1]; });
+
+    var text = 'during ' + fmt(window) + ': ';
+    if (!parts.length) {
+      text += 'no lane had a phase open — a stall, not a queue.';
+    } else {
+      var shown = [];
+      for (var k = 0; k < parts.length && k < 6; k++) {
+        shown.push(parts[k][0] + ' busy ' + parts[k][1].toFixed(0) + '%');
+      }
+      text += shown.join(', ');
+    }
+    selectionLabel.textContent = text;
+  }
+
+  function covered(intervals) {
+    intervals.sort(function (a, b) { return a[0] - b[0]; });
+    var total = 0, cursor = -Infinity;
+    for (var i = 0; i < intervals.length; i++) {
+      var start = Math.max(intervals[i][0], cursor);
+      if (intervals[i][1] > start) { total += intervals[i][1] - start; cursor = intervals[i][1]; }
+    }
+    return total;
+  }
+
+  function drawAxis(width, muted, rule) {
+    ctx.strokeStyle = rule; ctx.fillStyle = muted; ctx.lineWidth = 1;
+    var span = view.t1 - view.t0;
+    var step = Math.pow(10, Math.floor(Math.log10(span / 6)));
+    if (span / step > 12) { step *= 5; } else if (span / step > 6) { step *= 2; }
+    ctx.textAlign = 'center';
+    for (var t = Math.ceil(view.t0 / step) * step; t < view.t1; t += step) {
+      var x = xOf(t, width);
+      ctx.globalAlpha = 0.5;
+      ctx.beginPath(); ctx.moveTo(x, PAD_T - 6); ctx.lineTo(x, height() - 14); ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.fillText(fmt(t), x, 10);
+    }
+    ctx.textAlign = 'left';
+  }
+
+  function drawLaneLabel(i, width, fg, muted, rule) {
+    var y = laneTop[i];
+    ctx.fillStyle = fg;
+    // The disclosure marker doubles as the affordance: a lane that can be folded looks
+    // foldable, and one already folded says so without the reader having to count rows.
+    var marker = (lanes[i].rows || 1) > 1 ? (collapsed[i] ? '▸ ' : '▾ ') : '  ';
+    var label = marker + lanes[i].id;
+    if (label.length > 20) { label = label.slice(0, 19) + '…'; }
+    ctx.fillText(label, 6, y + 9);
+    ctx.fillStyle = muted;
+    ctx.fillText(lanes[i].role, 6, y + 21);
+    ctx.strokeStyle = rule; ctx.globalAlpha = 0.6;
+    ctx.beginPath();
+    ctx.moveTo(PAD_L, y + laneH[i]); ctx.lineTo(width - 10, y + laneH[i]);
+    ctx.stroke(); ctx.globalAlpha = 1;
+  }
+
+  function drawSpan(sp, width) {
+    if (onlyCritical && !sp.c) { return; }
+    // Dimmed, never hidden: a reader tracing a chain still needs to see what else was running
+    // to judge whether the gap around it was a queue or an empty machine.
+    var offChain = chain && !chain[spanKey(sp)];
+    if (offChain) { ctx.globalAlpha = 0.15; }
+    var x0 = xOf(sp.t, width), x1 = xOf(sp.t + sp.d, width);
+    if (x1 < PAD_L || x0 > width) { return; }
+    x0 = Math.max(x0, PAD_L);
+    var w = Math.max(x1 - x0, 1);
+    var y = laneTop[sp.l] + rowOf(sp) * ROW_H + 3, h = ROW_H - 3;
+    var colour = waitColour(sp.w);
+    if (colour === null) {
+      // Unmeasured CPU: hatched, so it can never be mistaken for a span that never waited.
+      ctx.fillStyle = css('--muted'); ctx.globalAlpha = 0.28;
+      ctx.fillRect(x0, y, w, h); ctx.globalAlpha = 1;
+      ctx.strokeStyle = css('--muted'); ctx.globalAlpha = 0.5;
+      ctx.beginPath();
+      for (var hx = x0; hx < x0 + w; hx += 5) {
+        ctx.moveTo(hx, y + h); ctx.lineTo(Math.min(hx + h, x0 + w), y);
+      }
+      ctx.stroke(); ctx.globalAlpha = 1;
+    } else {
+      ctx.fillStyle = colour;
+      ctx.fillRect(x0, y, w, h);
+    }
+    if (sp.c) {
+      ctx.strokeStyle = css('--accent'); ctx.lineWidth = 2;
+      ctx.strokeRect(x0 + 1, y + 1, w - 2, h - 2); ctx.lineWidth = 1;
+    }
+    if (focus && focus === sp) {
+      ctx.strokeStyle = css('--fg'); ctx.lineWidth = 2;
+      ctx.strokeRect(x0, y, w, h); ctx.lineWidth = 1;
+    }
+    if (w > 34 && !offChain) {
+      var name = sp.n.split('/').pop();
+      if (name.length * 6 < w - 6) {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(name, x0 + 4, y + h / 2);
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function laneOf(worker) {
+    for (var i = 0; i < lanes.length; i++) {
+      if (lanes[i].id.indexOf(worker + '#') === 0) { return i; }
+    }
+    return -1;
+  }
+
+  function drawArrows(width) {
+    if (!arrows.length) { return; }
+    ctx.strokeStyle = css('--cool'); ctx.fillStyle = css('--cool');
+    for (var i = 0; i < arrows.length; i++) {
+      var a = arrows[i];
+      var from = laneOf(a.s), to = laneOf(a.d);
+      if (from < 0 || to < 0) { continue; }
+      var x0 = xOf(a.t0, width), x1 = xOf(a.t1, width);
+      if (x1 < PAD_L || x0 > width) { continue; }
+      // Anchored to each lane's top row: that is the phase-open row, and it keeps arrows
+      // readable as a lane grows rows rather than burying them among nested bars.
+      var y0 = laneTop[from] + ROW_H / 2;
+      var y1 = laneTop[to] + ROW_H / 2;
+      ctx.globalAlpha = focus ? 0.25 : 0.55;
+      ctx.beginPath();
+      ctx.moveTo(x0, y0);
+      ctx.bezierCurveTo(x0 + 14, y0, x1 - 14, y1, x1, y1);
+      ctx.stroke();
+      var dir = y1 > y0 ? 1 : -1;
+      ctx.beginPath();
+      ctx.moveTo(x1, y1); ctx.lineTo(x1 - 4, y1 - 5 * dir); ctx.lineTo(x1 + 4, y1 - 5 * dir);
+      ctx.closePath(); ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function drawGpu(width, muted, rule) {
+    if (!gpu.length) { return; }
+    var base = lanesBottom;
+    for (var d = 0; d < gpu.length; d++) {
+      var top = base + d * GPU_H;
+      ctx.fillStyle = muted;
+      ctx.fillText('GPU ' + gpu[d].device, 6, top + GPU_H / 2);
+      var pts = gpu[d].points;
+      ctx.strokeStyle = css('--cool'); ctx.beginPath();
+      var started = false;
+      for (var i = 0; i < pts.length; i++) {
+        var x = xOf(pts[i][0] * 1e6, width);
+        var y = top + GPU_H - 6 - (pts[i][1] / 100) * (GPU_H - 12);
+        if (!started) { ctx.moveTo(x, y); started = true; } else { ctx.lineTo(x, y); }
+      }
+      ctx.stroke();
+      ctx.strokeStyle = rule; ctx.globalAlpha = 0.6;
+      ctx.beginPath(); ctx.moveTo(PAD_L, top + GPU_H); ctx.lineTo(width - 10, top + GPU_H);
+      ctx.stroke(); ctx.globalAlpha = 1;
+    }
+  }
+
+  // Which lane owns this pixel, given lanes are no longer a uniform height.
+  function laneAtY(py) {
+    for (var i = 0; i < lanes.length; i++) {
+      if (py >= laneTop[i] && py < laneTop[i] + laneH[i]) { return i; }
+    }
+    return -1;
+  }
+
+  function spanAt(px, py) {
+    var width = wrap.clientWidth;
+    var lane = laneAtY(py);
+    if (lane < 0) { return null; }
+    // Now that a nested span has its own row, the row under the cursor identifies it
+    // exactly. The old innermost-wins guess existed only because parent and child shared
+    // a row, and it made a parent bar unhoverable.
+    var row = Math.floor((py - laneTop[lane]) / ROW_H);
+    var t = tOf(px, width);
+    for (var i = 0; i < spans.length; i++) {
+      var sp = spans[i];
+      if (sp.l !== lane || rowOf(sp) !== row) { continue; }
+      if (sp.t <= t && sp.t + sp.d >= t) { return sp; }
+    }
+    return null;
+  }
+
+  el.addEventListener('mousemove', function (event) {
+    if (dragging) { return; }
+    var box = el.getBoundingClientRect();
+    var sp = spanAt(event.clientX - box.left, event.clientY - box.top);
+    hover = sp;
+    if (!sp) { tip.hidden = true; return; }
+    var waitText = sp.w < 0 ? 'unknown (derived from a function call)' : sp.w.toFixed(0) + '%';
+    // Built as DOM nodes, never as an HTML string. Phase names come from user code, so a
+    // name containing an image tag with an error handler would otherwise run that handler in
+    // whoever opens the report — and a profiling artifact gets mailed around and opened by
+    // other people.
+    tip.textContent = '';
+    tip.appendChild(named('div', 'p', sp.n));
+    tip.appendChild(named('div', '', lanes[sp.l].id + ' · ' + lanes[sp.l].role));
+    tip.appendChild(named('div', '', 'duration ' + fmt(sp.d)));
+    tip.appendChild(named('div', '', 'waiting ' + waitText));
+    var org = originOf(sp);
+    if (org) {
+      // The function's definition site, not the line that blocked: a span covers a whole
+      // call, so naming one line inside it would claim more than was measured.
+      tip.appendChild(named('div', 'src', org.n + '()'));
+      tip.appendChild(named('div', 'src', org.f + ':' + org.l));
+    }
+    if (sp.c) { tip.appendChild(named('div', 'crit', 'on the critical path')); }
+    tip.hidden = false;
+    var x = event.clientX - box.left + 14, y = event.clientY - box.top + 14;
+    if (x + tip.offsetWidth > box.width) { x = box.width - tip.offsetWidth - 6; }
+    tip.style.left = x + 'px'; tip.style.top = y + 'px';
+  });
+  el.addEventListener('mouseleave', function () { tip.hidden = true; hover = null; });
+  el.addEventListener('click', function (event) {
+    // The label gutter and the chart answer different clicks. Folding a lane from its own
+    // label is where a reader looks for it; putting it in the toolbar would mean naming the
+    // lane in a menu, which is the thing they were already pointing at.
+    var box = el.getBoundingClientRect();
+    if (event.clientX - box.left < PAD_L) {
+      var lane = laneAtY(event.clientY - box.top);
+      if (lane >= 0 && (lanes[lane].rows || 1) > 1) {
+        collapsed[lane] = !collapsed[lane];
+        layout();
+        resize();
+      }
+      return;
+    }
+    focus = (focus === hover) ? null : hover;
+    describeFocus();
+    draw();
+  });
+
+  // What a click is *for*. The outline alone told the reader their click had registered and
+  // nothing else; the question they clicked to ask was "why was this span waiting", and the
+  // trace already knows — the arrows name the producer, and the other lanes say what was
+  // running. Answering it here is what makes the timeline traceable rather than decorative.
+  function describeFocus() {
+    focusPanel.textContent = '';
+    chain = focus ? causalChain(focus) : null;
+    if (!focus) { return; }
+    var lane = lanes[focus.l] || { id: '?', role: '' };
+    focusPanel.appendChild(named('div', 'lead', focus.n + ' on ' + lane.id));
+
+    var line = fmt(focus.d) + ' wall';
+    if (focus.w >= 0) {
+      line += ', ' + focus.w.toFixed(0) + '% of it blocked';
+    } else {
+      line += ', CPU time not measured so its wait is unknown';
+    }
+    focusPanel.appendChild(named('div', '', line));
+
+    // The full path here rather than the shortened one: this panel is what a reader copies
+    // into an editor, and a path relative to a root they have to infer is not that.
+    var org = originOf(focus);
+    if (org) {
+      focusPanel.appendChild(named('div', 'src',
+        'defined at ' + (org.full || org.f) + ':' + org.l + ' in ' + org.n + '()'));
+    }
+
+    var release = releasingArrow(focus);
+    if (release) {
+      focusPanel.appendChild(named('div', '',
+        'released by ' + release.s + ' via ' + release.ch + ', ' +
+        fmt(Math.max(0, release.t1 - release.t0)) + ' before this span ended'));
+    } else if (focus.w > 50) {
+      focusPanel.appendChild(named('div', '',
+        'no signal/wait_on pair covers this wait, so who released it was not recorded'));
+    }
+
+    var busy = concurrentLanes(focus);
+    if (busy.length) {
+      focusPanel.appendChild(named('div', '', 'while it ran: ' + busy.join(', ')));
+    } else {
+      focusPanel.appendChild(named('div', '',
+        'no other lane had a phase open while it ran — a stall, not a queue'));
+    }
+    focusPanel.appendChild(named('div', '', 'click the span again to unpin.'));
+  }
+
+  // Every span causally upstream of the focused one, walked back through the arrows: the
+  // producer that released it, whatever released *that*, and so on. This is what "trace what
+  // it was waiting for" was always supposed to mean — a pinned span with a dimmed background
+  // shows the chain that led to it rather than just the span itself.
+  //
+  // Bounded by a visited set, because a cycle in recorded links is not hypothetical: two
+  // workers that each wait on the other produce one, and an unbounded walk would hang the
+  // page rather than draw a wrong picture.
+  function causalChain(sp) {
+    if (!sp) { return null; }
+    var members = {};
+    var queue = [sp];
+    var guard = 0;
+    members[spanKey(sp)] = true;
+    while (queue.length && guard++ < 4000) {
+      var current = queue.shift();
+      var release = releasingArrow(current);
+      if (!release) { continue; }
+      // The producer's span is whatever was open on its lane when it signalled.
+      for (var i = 0; i < spans.length; i++) {
+        var other = spans[i];
+        var lane = lanes[other.l];
+        if (!lane || lane.id.split('#')[0] !== release.s) { continue; }
+        if (other.t > release.t0 || other.t + other.d < release.t0) { continue; }
+        var key = spanKey(other);
+        if (members[key]) { continue; }
+        members[key] = true;
+        queue.push(other);
+      }
+    }
+    return members;
+  }
+
+  function spanKey(sp) {
+    return sp.l + ':' + sp.t + ':' + sp.n;
+  }
+
+  // The arrow that landed on this span's lane during its life, newest first: that is the
+  // signal the waiter was released by.
+  function releasingArrow(sp) {
+    var lane = lanes[sp.l];
+    if (!lane) { return null; }
+    var worker = lane.id.split('#')[0];
+    var best = null;
+    for (var i = 0; i < arrows.length; i++) {
+      var a = arrows[i];
+      if (a.d !== worker) { continue; }
+      if (a.t1 < sp.t || a.t1 > sp.t + sp.d) { continue; }
+      if (!best || a.t1 > best.t1) { best = a; }
+    }
+    return best;
+  }
+
+  // Which other lanes had a phase open while this span ran, as a share of its duration. The
+  // stall-versus-queue question for one span, answered without the reader dragging a range.
+  function concurrentLanes(sp) {
+    var from = sp.t, to = sp.t + sp.d;
+    if (to <= from) { return []; }
+    var byLane = {};
+    for (var i = 0; i < spans.length; i++) {
+      var other = spans[i];
+      if (other.l === sp.l) { continue; }
+      var lo = Math.max(other.t, from), hi = Math.min(other.t + other.d, to);
+      if (hi <= lo) { continue; }
+      var key = lanes[other.l] ? lanes[other.l].id : String(other.l);
+      if (!byLane[key]) { byLane[key] = []; }
+      byLane[key].push([lo, hi]);
+    }
+    var parts = [];
+    for (var name in byLane) {
+      if (!Object.prototype.hasOwnProperty.call(byLane, name)) { continue; }
+      parts.push([name, 100 * covered(byLane[name]) / (to - from)]);
+    }
+    parts.sort(function (a, b) { return b[1] - a[1]; });
+    var shown = [];
+    for (var k = 0; k < parts.length && k < 4; k++) {
+      shown.push(parts[k][0] + ' ' + parts[k][1].toFixed(0) + '%');
+    }
+    return shown;
+  }
+
+  var dragging = false, dragX = 0, dragT = 0;
+  el.addEventListener('mousedown', function (event) {
+    if (brushing) {
+      // A brush and a pan both start with a press on the canvas, so the mode decides which.
+      var rect = el.getBoundingClientRect();
+      brushFrom = tOf(event.clientX - rect.left, wrap.clientWidth);
+      brushTo = brushFrom;
+      tip.hidden = true;
+      draw();
+      return;
+    }
+    dragging = true; dragX = event.clientX; dragT = view.t0;
+    el.classList.add('dragging'); tip.hidden = true;
+  });
+  window.addEventListener('mouseup', function () {
+    dragging = false; el.classList.remove('dragging');
+    if (brushFrom !== null && brushTo !== null) { describeSelection(); }
+  });
+  window.addEventListener('mousemove', function (event) {
+    if (brushing && brushFrom !== null) {
+      var box = el.getBoundingClientRect();
+      brushTo = tOf(event.clientX - box.left, wrap.clientWidth);
+      draw();
+      return;
+    }
+    if (!dragging) { return; }
+    var width = wrap.clientWidth;
+    var perPx = (view.t1 - view.t0) / (width - PAD_L - 10);
+    var shift = (event.clientX - dragX) * perPx;
+    var span = view.t1 - view.t0;
+    view.t0 = dragT - shift;
+    view.t1 = view.t0 + span;
+    draw();
+  });
+  el.addEventListener('wheel', function (event) {
+    event.preventDefault();
+    var width = wrap.clientWidth;
+    var box = el.getBoundingClientRect();
+    var anchor = tOf(event.clientX - box.left, width);
+    var factor = event.deltaY > 0 ? 1.25 : 0.8;
+    var span = (view.t1 - view.t0) * factor;
+    if (span > total * 4 || span < 0.05) { return; }
+    var ratio = (anchor - view.t0) / (view.t1 - view.t0);
+    view.t0 = anchor - span * ratio;
+    view.t1 = view.t0 + span;
+    draw();
+  }, { passive: false });
+
+  document.getElementById('tl-reset').addEventListener('click', function () {
+    view.t0 = 0; view.t1 = total; focus = null;
+    describeFocus();
+    draw();
+  });
+
+  // The findings section names a lane or a phase; these buttons carry that name down to the
+  // chart. Zooming to the widest matching span rather than merely highlighting it, because a
+  // finding about a phase buried at 4% of the way through a five-minute run is not visible
+  // at full zoom, and a reader told to "look at queue_get" with no way to get there is being
+  // given a homework assignment rather than an answer.
+  function jumpTo(anchor) {
+    var best = null;
+    for (var i = 0; i < spans.length; i++) {
+      var sp = spans[i];
+      var lane = lanes[sp.l] ? lanes[sp.l].id : '';
+      if (sp.n !== anchor && lane !== anchor) { continue; }
+      if (!best || sp.d > best.d) { best = sp; }
+    }
+    if (!best) { return; }
+    var pad = Math.max(best.d * 0.5, total * 0.01);
+    view.t0 = best.t - pad;
+    view.t1 = best.t + best.d + pad;
+    focus = best;
+    describeFocus();
+    draw();
+    wrap.scrollIntoView({ block: 'center' });
+  }
+
+  var jumps = document.getElementsByClassName('tl-jump');
+  for (var j = 0; j < jumps.length; j++) {
+    jumps[j].addEventListener('click', function (event) {
+      jumpTo(event.currentTarget.getAttribute('data-anchor'));
+    });
+  }
+  var criticalButton = document.getElementById('tl-critical');
+  criticalButton.addEventListener('click', function () {
+    onlyCritical = !onlyCritical;
+    criticalButton.setAttribute('aria-pressed', onlyCritical ? 'true' : 'false');
+    draw();
+  });
+  var brushButton = document.getElementById('tl-brush');
+  brushButton.addEventListener('click', function () {
+    brushing = !brushing;
+    brushButton.setAttribute('aria-pressed', brushing ? 'true' : 'false');
+    if (!brushing) { brushFrom = null; brushTo = null; selectionLabel.textContent = ''; }
+    draw();
+  });
+
+  // Keyboard navigation. A canvas is not reachable by keyboard at all without this, so the
+  // whole chart was mouse-only — and stepping the critical path one span at a time is the
+  // fastest way to read it even with a mouse, because each step re-centres and re-pins.
+  //
+  // Bound to the canvas rather than the document, and only after it is focused, so arrow keys
+  // still scroll the page while the reader is anywhere else on it.
+  el.tabIndex = 0;
+  el.addEventListener('keydown', function (event) {
+    var span = view.t1 - view.t0;
+    var handled = true;
+    if (event.key === 'ArrowLeft') {
+      view.t0 -= span * 0.15; view.t1 -= span * 0.15;
+    } else if (event.key === 'ArrowRight') {
+      view.t0 += span * 0.15; view.t1 += span * 0.15;
+    } else if (event.key === '+' || event.key === '=') {
+      zoomBy(0.8);
+    } else if (event.key === '-' || event.key === '_') {
+      zoomBy(1.25);
+    } else if (event.key === 'n' || event.key === 'p') {
+      stepCritical(event.key === 'n' ? 1 : -1);
+    } else if (event.key === 'Escape') {
+      focus = null; chain = null; describeFocus();
+    } else if (event.key === '0') {
+      view.t0 = 0; view.t1 = total;
+    } else {
+      handled = false;
+    }
+    if (handled) { event.preventDefault(); draw(); }
+  });
+
+  function zoomBy(factor) {
+    var middle = (view.t0 + view.t1) / 2;
+    var span = (view.t1 - view.t0) * factor;
+    if (span > total * 4 || span < 0.05) { return; }
+    view.t0 = middle - span / 2;
+    view.t1 = middle + span / 2;
+  }
+
+  // Walking the critical path in recorded order, centring each span. The chain is the ordered
+  // answer to "what set this run's length", and reading it off the chart otherwise means
+  // hunting for outlined bars across lanes that may be far apart vertically.
+  function stepCritical(direction) {
+    var path = [];
+    for (var i = 0; i < spans.length; i++) {
+      if (spans[i].c) { path.push(spans[i]); }
+    }
+    if (!path.length) { return; }
+    path.sort(function (a, b) { return a.t - b.t; });
+    var index = -1;
+    for (var k = 0; k < path.length; k++) {
+      if (path[k] === focus) { index = k; break; }
+    }
+    index = (index + direction + path.length) % path.length;
+    var target = path[index];
+    focus = target;
+    var pad = Math.max(target.d * 0.6, total * 0.005);
+    view.t0 = target.t - pad;
+    view.t1 = target.t + target.d + pad;
+    describeFocus();
+  }
+
+  window.addEventListener('resize', resize);
+  resize();
+})();
+</script>
+</body>
+</html>

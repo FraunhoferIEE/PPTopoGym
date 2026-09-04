@@ -1,0 +1,141 @@
+/mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/lightsim2grid/gridmodel/from_pandapower/_aux_add_slack.py:60: UserWarning: LightSim has not found any generators tagged as "slack bus" in the pandapower network.I will attempt to add some from the ext_grid.
+  warnings.warn("LightSim has not found any generators tagged as \"slack bus\" in the pandapower network."
+Power flow did not converge at creating an observation at step 51
+Net did not converge.
+Power flow did not converge at creating an observation at step 51
+Power flow did not converge at creating an observation at step 19
+Net did not converge.
+Power flow did not converge at creating an observation at step 19
+Power flow did not converge at creating an observation at step 18
+Net did not converge.
+Power flow did not converge at creating an observation at step 18
+Power flow did not converge at creating an observation at step 9
+Net did not converge.
+Power flow did not converge at creating an observation at step 9
+Power flow did not converge at creating an observation at step 35
+Net did not converge.
+Power flow did not converge at creating an observation at step 35
+Power flow did not converge at creating an observation at step 17
+Net did not converge.
+Power flow did not converge at creating an observation at step 17
+Power flow did not converge at creating an observation at step 17
+Net did not converge.
+Power flow did not converge at creating an observation at step 17
+Power flow did not converge at creating an observation at step 35
+Net did not converge.
+Power flow did not converge at creating an observation at step 35
+Power flow did not converge at creating an observation at step 5
+Net did not converge.
+Power flow did not converge at creating an observation at step 5
+Power flow did not converge at creating an observation at step 24
+Net did not converge.
+Power flow did not converge at creating an observation at step 24
+Power flow did not converge at creating an observation at step 11
+Net did not converge.
+Power flow did not converge at creating an observation at step 11
+Power flow did not converge at creating an observation at step 13
+Net did not converge.
+Power flow did not converge at creating an observation at step 13
+Power flow did not converge at creating an observation at step 25
+Net did not converge.
+Power flow did not converge at creating an observation at step 25
+Power flow did not converge at creating an observation at step 18
+Net did not converge.
+Power flow did not converge at creating an observation at step 18
+         4629420 function calls (4518522 primitive calls) in 3.310 seconds
+
+   Ordered by: cumulative time
+   List reduced from 536 to 45 due to restriction <45>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+    14902    0.017    0.000    1.220    0.000 /mnt/home/dkoehler/all_projects/pandapower-env/pandapower_env/environments/simulation_env.py:689(_get_default_observation)
+     3516    0.024    0.000    0.919    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/frame.py:694(__init__)
+     3516    0.032    0.000    0.822    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/internals/construction.py:423(dict_to_mgr)
+    33402    0.105    0.000    0.609    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/frame.py:4067(__getitem__)
+     2644    0.013    0.000    0.506    0.000 /mnt/home/dkoehler/all_projects/pandapower-env/pandapower_env/environments/simulation_env.py:859(_get_aggregate_value)
+     7458    0.023    0.000    0.435    0.000 /mnt/home/dkoehler/all_projects/pandapower-env/pandapower_env/environments/simulation_env.py:759(_get_table_value)
+     7458    0.042    0.000    0.316    0.000 /mnt/home/dkoehler/all_projects/pandapower-env/pandapower_env/toolbox/utils_graph_obs.py:492(get_observation)
+835152/832808    0.197    0.000    0.296    0.000 {built-in method builtins.isinstance}
+      300    0.000    0.000    0.290    0.001 /mnt/home/dkoehler/all_projects/pandapower-env/pandapower_env/environments/simulation_env.py:958(_observation_before_to_info)
+     3516    0.009    0.000    0.288    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/internals/construction.py:96(arrays_to_mgr)
+    33264    0.043    0.000    0.281    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/frame.py:4631(_get_item_cache)
+    16712    0.081    0.000    0.264    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/construction.py:517(sanitize_array)
+      572    0.013    0.000    0.249    0.000 /mnt/home/dkoehler/all_projects/pandapower-env/pandapower_env/toolbox/utils.py:290(total_active_overload_mva)
+4102/2930    0.037    0.000    0.241    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/series.py:389(__init__)
+      586    0.004    0.000    0.213    0.000 /mnt/home/dkoehler/all_projects/pandapower-env/pandapower_env/environments/gym_env_pp.py:808(_grid_is_disconnected)
+     5687    0.012    0.000    0.202    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/frame.py:3988(_ixs)
+     2620    0.032    0.000    0.196    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/indexes/base.py:475(__new__)
+      586    0.002    0.000    0.186    0.000 /mnt/home/dkoehler/all_projects/pandapower-env/pandapower_env/toolbox/ls2g_backend.py:510(_write_trafo_results)
+     3516    0.021    0.000    0.178    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/internals/construction.py:596(_homogenize)
+     3516    0.002    0.000    0.161    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/dtypes/missing.py:101(isna)
+     1758    0.001    0.000    0.160    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/series.py:5784(isna)
+     1758    0.002    0.000    0.159    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/generic.py:8712(isna)
+     3516    0.013    0.000    0.159    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/dtypes/missing.py:184(_isna)
+    34044    0.060    0.000    0.143    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/base.py:545(to_numpy)
+     1800    0.007    0.000    0.136    0.000 /mnt/home/dkoehler/all_projects/pandapower-env/pandapower_env/environments/simulation_env.py:829(_get_profile_value)
+2246/2108    0.005    0.000    0.133    0.000 /mnt/home/dkoehler/all_projects/pandapower-env/pandapower_env/toolbox/utils_graph_obs.py:213(wrapper)
+     2400    0.005    0.000    0.128    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/indexing.py:1176(__getitem__)
+     8434    0.015    0.000    0.127    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/generic.py:6303(__getattr__)
+    55986    0.065    0.000    0.122    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandapower/auxiliary.py:245(__getattr__)
+      572    0.002    0.000    0.121    0.000 /mnt/home/dkoehler/all_projects/pandapower-env/pandapower_env/toolbox/utils.py:367(_worst_apparent_power)
+     2400    0.008    0.000    0.117    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/indexing.py:1397(_getitem_axis)
+     1144    0.009    0.000    0.115    0.000 /mnt/home/dkoehler/all_projects/pandapower-env/pandapower_env/toolbox/utils.py:358(_apparent_power)
+265905/163997    0.069    0.000    0.105    0.000 {built-in method builtins.len}
+      300    0.012    0.000    0.105    0.000 /mnt/home/dkoehler/all_projects/pandapower-env/pandapower_env/environments/gym_env_pp.py:680(load_profile_timestep_into_net)
+     5687    0.011    0.000    0.101    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/frame.py:4613(_box_col_values)
+   519271    0.100    0.000    0.100    0.000 {method 'get' of 'dict' objects}
+     3516    0.010    0.000    0.097    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/series.py:6429(_reduce)
+      600    0.001    0.000    0.096    0.000 /mnt/home/dkoehler/all_projects/pandapower-env/pandapower_env/environments/simulation_env.py:728(_get_custom_value)
+     3516    0.011    0.000    0.094    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/internals/managers.py:2121(create_block_manager_from_column_arrays)
+      586    0.066    0.000    0.093    0.000 /mnt/home/dkoehler/all_projects/pandapower-env/pandapower_env/toolbox/ls2g_backend.py:438(_write_bus_lookup)
+     1800    0.005    0.000    0.091    0.000 /mnt/home/dkoehler/all_projects/pandapower-env/pandapower_env/environments/simulation_env.py:802(_current_profile_rows)
+     2400    0.002    0.000    0.087    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/indexing.py:1379(_get_label)
+     2400    0.016    0.000    0.086    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/generic.py:4178(xs)
+     1172    0.004    0.000    0.086    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/series.py:607(_init_dict)
+      572    0.001    0.000    0.084    0.000 /mnt/home/dkoehler/all_projects/pandapower-env/pandapower_env/observation_space/pp_to_observation.py:274(line_loading_max)
+
+
+====================================================================================================
+         4629420 function calls (4518522 primitive calls) in 3.310 seconds
+
+   Ordered by: internal time
+   List reduced from 536 to 35 due to restriction <35>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+835152/832808    0.197    0.000    0.296    0.000 {built-in method builtins.isinstance}
+    33402    0.105    0.000    0.609    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/frame.py:4067(__getitem__)
+   519271    0.100    0.000    0.100    0.000 {method 'get' of 'dict' objects}
+  583/101    0.097    0.000    0.034    0.000 /mnt/home/dkoehler/all_projects/pandapower-env/pandapower_env/toolbox/ls2g_backend.py:376(_sync_active_buses)
+  585/101    0.091    0.000    0.040    0.000 /mnt/home/dkoehler/all_projects/pandapower-env/pandapower_env/toolbox/ls2g_backend.py:335(_push_topology)
+    24462    0.081    0.000    0.081    0.000 {method 'reduce' of 'numpy.ufunc' objects}
+    16712    0.081    0.000    0.264    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/construction.py:517(sanitize_array)
+265905/163997    0.069    0.000    0.105    0.000 {built-in method builtins.len}
+      586    0.066    0.000    0.093    0.000 /mnt/home/dkoehler/all_projects/pandapower-env/pandapower_env/toolbox/ls2g_backend.py:438(_write_bus_lookup)
+    55986    0.065    0.000    0.122    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandapower/auxiliary.py:245(__getattr__)
+    34044    0.060    0.000    0.143    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/base.py:545(to_numpy)
+    34774    0.052    0.000    0.079    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/generic.py:6320(__setattr__)
+    16765    0.046    0.000    0.055    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/generic.py:278(__init__)
+    33264    0.043    0.000    0.281    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/frame.py:4631(_get_item_cache)
+   176014    0.043    0.000    0.075    0.000 {built-in method builtins.getattr}
+     7458    0.042    0.000    0.316    0.000 /mnt/home/dkoehler/all_projects/pandapower-env/pandapower_env/toolbox/utils_graph_obs.py:492(get_observation)
+    10905    0.042    0.000    0.059    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/generic.py:6255(__finalize__)
+    39266    0.038    0.000    0.056    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/indexes/base.py:5335(__contains__)
+4102/2930    0.037    0.000    0.241    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/series.py:389(__init__)
+      600    0.035    0.000    0.061    0.000 /mnt/home/dkoehler/all_projects/pandapower-env/pandapower_env/toolbox/ls2g_backend.py:156(current_bus_assignment)
+    90064    0.034    0.000    0.080    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/dtypes/generic.py:42(_instancecheck)
+     5687    0.034    0.000    0.060    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/internals/managers.py:1012(iget)
+     8944    0.032    0.000    0.032    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/numpy/_core/_methods.py:99(_clip)
+     2620    0.032    0.000    0.196    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/indexes/base.py:475(__new__)
+     3516    0.032    0.000    0.822    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/internals/construction.py:423(dict_to_mgr)
+    90064    0.030    0.000    0.045    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/dtypes/generic.py:37(_check)
+    57913    0.029    0.000    0.052    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandapower/auxiliary.py:292(_valid_name)
+    35802    0.028    0.000    0.051    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/indexing.py:2765(check_dict_or_set_indexers)
+     3516    0.026    0.000    0.073    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/internals/managers.py:2190(_form_blocks)
+     3516    0.024    0.000    0.919    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/frame.py:694(__init__)
+     6952    0.024    0.000    0.057    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/numpy/_core/numeric.py:2445(array_equal)
+     7458    0.023    0.000    0.435    0.000 /mnt/home/dkoehler/all_projects/pandapower-env/pandapower_env/environments/simulation_env.py:759(_get_table_value)
+62086/61500    0.022    0.000    0.039    0.000 {built-in method numpy.asarray}
+     3516    0.021    0.000    0.178    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/internals/construction.py:596(_homogenize)
+    34492    0.020    0.000    0.024    0.000 /mnt/home/dkoehler/all_projects/muzero/ap3_mcts/.venv/lib/python3.12/site-packages/pandas/core/internals/managers.py:1993(dtype)
+
+

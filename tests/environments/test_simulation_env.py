@@ -1,9 +1,17 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import numpy as np
+import pytest
+from gymnasium import spaces
+
+if TYPE_CHECKING:
+    from pandapower_env.environments.simulation_env import PPTopoGym
 import contextlib
 import copy
 
-import numpy as np
 import pandapower as pp
-from gymnasium import spaces
 
 from pandapower_env.environments.simulation_env import LoggedArray, Output, PPTopoGym
 
@@ -90,6 +98,15 @@ def test_step_function(simenv, env_config) -> None:
     assert (
         len(outputs) == num_outputs
     ), "Step function did not return correct number of outputs"
+    # test if original config is given precisely
+    sim_cfg = simenv_2.orig_config
+    assert sim_cfg.keys() == env_config.keys()
+    # test string
+    string_result = simenv.__str__()
+    assert isinstance(string_result, str)
+    env_config["reward"] = "reward_better_than_donothing"
+    env2 = PPTopoGym(env_config)
+    assert env2.reward_function != env2._default_reward_function
 
 def test_load_action(simenv) -> None:
     simenv.net.converged = "test"
@@ -113,6 +130,11 @@ def test_reset_function(simenv) -> None:
     assert (
         simenv.net.line["in_service"]
     ).all(), "Not all lines are in service after reset"
+    simenv.net.converged = False
+    obs, info = simenv.reset(options={"index": 1})
+    assert len(info) == 0
+    assert "adjacency_matrix" in obs
+
 
 
 def test_load_action_does_not_log(simenv) -> None:
@@ -150,7 +172,10 @@ def test_simulation_process(simenv) -> None:
     assert (
         simenv.net.line["in_service"]
     ).all(), "Not all lines are in service after simulation"
-
+    simenv.reset(options={"index":0})
+    simenv.net.res_line["max_loading_percent"] = 0.0
+    with pytest.raises(ValueError):  # noqa: PT011
+        simenv.simulation_nminus1([3, 1])
 
 def test_simulation_log_deletion(simenv) -> None:
     """Ensure that simulation logs are correctly deleted after simulations."""
@@ -178,7 +203,9 @@ def test_observation_keys_match_space(simenv) -> None:
 def test_state_from_info(simenv, simenv2) -> None:
     """Ensure that state is correctly extracted from observation."""
     simenv.reset()
-    simenv.step(2)
+    # Action 3, not 2: action 2 splits a 9-bus island off the grid, which now
+    # terminates the episode (see test_disconnected_grid_terminates).
+    simenv.step(3)
     info = simenv.state_to_info()
     simenv2.reset()
     pp.runpp(simenv.net)
@@ -216,6 +243,20 @@ def test_state_from_info(simenv, simenv2) -> None:
         assert (
             is_close
         ), f"Line loading mismatch at index={i} -> simenv2={v1} vs simenv={v2}"
+
+    # test that info-current step does not change when advancing
+    info = simenv.initialize_info()
+    current_step = info["current_step"]
+    simenv.step(0)
+    new_step =  simenv.initialize_info()["current_step"]
+    assert current_step +1 == new_step
+    new_info: dict = {}
+    new_info["_source_instance_id"] = id(simenv)
+    with pytest.raises(ValueError):  # noqa: PT011
+        simenv.state_from_info(new_info)
+
+
+
 
 
 def test_verify_action(simenv) -> None:
@@ -266,3 +307,34 @@ def test_current_step(simenv) -> None:
         simenv.step(0)
     assert (simenv.log_actions == np.full(episode_length, 0)).all()
 
+
+
+def test_disconnected_grid_terminates(env_config) -> None:
+    """
+    Splitting the grid off an island must end the episode instead of scoring it.
+
+    Lines 7 and 12 are the only lines feeding bus 10 (a load bus) in case14, so
+    opening both islands that load. pandapower still "converges" in that case --
+    it drops the island -- which would otherwise yield a normal, positive reward
+    for a grid that no longer serves all its loads.
+    """
+    islanding_action = {
+        "action": 1,
+        "substations": [],
+        "states": [],
+        "lines": [7, 12],
+        "disconnect_lines": [True, True],
+    }
+    env_config["action_space"] = [
+        {"action": 0, "substations": [], "states": []},
+        islanding_action,
+    ]
+    env = PPTopoGym(env_config)
+    env.reset(options={"index": 0})
+
+    _obs, reward, terminated, truncated, info = env.step(1)
+
+    assert terminated
+    assert not truncated
+    assert info["crashed"] is True
+    assert reward == env.worst_reward

@@ -19,7 +19,7 @@ from pandapower import pandapowerNet
 from pandapower.create import _get_index_with_check
 
 from pandapower_env.substation.double_busbar_substation import (
-    _busbar_columns,
+    busbar_columns,
     reorder_substation_df,
 )
 from pandapower_env.toolbox.pandapower_tools import (
@@ -127,27 +127,6 @@ def can_convert_to_n_busbar_substation(
     return True
 
 
-def _find_bus2bus_switch(net: pandapowerNet, bus0: int, bus1: int) -> int:
-    """
-    Find the bus-bus switch connecting two buses.
-
-    :param net: The pandapower network
-    :type net: pandapowerNet
-    :param bus0: index of the "bus 0" busbar in the network (net.bus Dataframe)
-    :type bus0: int
-    :param bus1: index of the "bus 1" busbar in the network (net.bus Dataframe)
-    :type bus1: int
-    :return: The index of the existing switch connecting the two buses, corresponding to
-        the net.switch Dataframe
-    :rtype: int
-    """
-    sw = net.switch[net.switch["et"] == "b"]
-    tmp = []
-    tmp += sw[(sw["bus"] == bus0) & (sw["element"] == bus1)].index.tolist()
-    tmp += sw[(sw["bus"] == bus1) & (sw["element"] == bus0)].index.tolist()
-    return tmp[0]
-
-
 def copy_bus(net: pandapowerNet, ibus: int, name: str) -> int:
     """
     Create a new bus with parameters identical to the copied bus, and add it to the network.
@@ -161,18 +140,45 @@ def copy_bus(net: pandapowerNet, ibus: int, name: str) -> int:
     :return new_index: index of the new bus in the network (net.bus Dataframe)
     :rtype: int
     """
-    # The line below creates a dataframe
-    tmp_df = net.bus.loc[net.bus.index == ibus].copy()
-    new_index = _get_index_with_check(net, "bus", None)
-    tmp_df.index = [new_index]
-    tmp_df["name"] = name
-    net.bus = pd.concat([net.bus, tmp_df])
+    return copy_buses(net, ibus, [name])[0]
+
+
+def copy_buses(net: pandapowerNet, ibus: int, names: list[str]) -> list[int]:
+    """
+    Create several copies of one bus in a single append, and return their new indices.
+
+    Batched because ``net.bus`` is reallocated by every ``pd.concat``: copying buses one at a
+    time inside a per-element loop made substation creation O(n_bus^2). The indices handed
+    out are the same consecutive ones ``_get_index_with_check`` would allocate call by call
+    (``get_free_id`` is ``index.max() + 1``), so the resulting net is identical.
+
+    :param net: The pandapower network, mutated in place
+    :type net: pandapowerNet
+    :param ibus: index of the bus to copy (net.bus Dataframe)
+    :type ibus: int
+    :param names: the name for each new bus; one bus is created per entry
+    :type names: list[str]
+    :return: the new bus indices, in the order of ``names``
+    :rtype: list[int]
+    """
+    if not names:
+        return []
+    # Keep ``_get_index_with_check``'s numpy integer type: these indices are stored verbatim in
+    # the ``connected_buses`` list column, where a plain Python int would serialize differently.
+    first_index = _get_index_with_check(net, "bus", None)
+    new_indices = [first_index + offset for offset in range(len(names))]
+
+    new_rows = net.bus.loc[[ibus] * len(names)].copy()
+    new_rows.index = new_indices
+    new_rows["name"] = names
+    net.bus = pd.concat([net.bus, new_rows])
+
     # copy the geodata
     if hasattr(net, "bus_geodata"):
-        tmp_df = net.bus_geodata.loc[net.bus_geodata.index == ibus].copy()
-        tmp_df.index = [new_index]
-        net.bus_geodata = pd.concat([net.bus_geodata, tmp_df])
-    return new_index
+        geo_rows = net.bus_geodata.loc[[ibus] * len(names)].copy()
+        geo_rows.index = new_indices
+        net.bus_geodata = pd.concat([net.bus_geodata, geo_rows])
+    return new_indices
 
 
 def create_n_busbars(net: pandapowerNet, ibus: int, n: int) -> list[int]:
@@ -189,7 +195,7 @@ def create_n_busbars(net: pandapowerNet, ibus: int, n: int) -> list[int]:
     :rtype: list[int]
     """
     # Create a list of new bus indices (n-1 many)
-    return [copy_bus(net, ibus, name=f"bus {i}") for i in range(n - 1)]
+    return copy_buses(net, ibus, [f"bus {i}" for i in range(n - 1)])
 
 
 def create_n_busbar_switches(
@@ -282,23 +288,24 @@ def _create_buses_and_switches_for_substation_elements(
         df_element = df_element[df_element["tap_changer_type"] != "Ideal"]
 
     if bus_col is not None:
-        elements = df_element[df_element[bus_col] == bus0]
+        elements = df_element[df_element[bus_col] == bus0].copy()
         # if bus_col == True, the following is not used in this case
         elements["bus_column"] = bus_col
     else:
         # We look at from and to separately to properly consider PSTs,
         # which have both "lv" and "hv" attached to bus0
-        elements_from = df_element[df_element[from_bus_col] == bus0]
+        elements_from = df_element[df_element[from_bus_col] == bus0].copy()
         elements_from["bus_column"] = from_bus_col
-        elements_to = df_element[df_element[to_bus_col] == bus0]
+        elements_to = df_element[df_element[to_bus_col] == bus0].copy()
         elements_to["bus_column"] = to_bus_col
         elements = pd.concat([elements_from, elements_to]).sort_index()
 
-    # add element name
-    for iel, row in elements.iterrows():  # iel == index of the element
-        name = f"new bus between bus {bus0} and line {iel}"
-        bus_for_el = copy_bus(net, bus0, name=name)
+    # One append for the whole substation rather than one per element (see copy_buses).
+    element_bus_names = [f"new bus between bus {bus0} and line {iel}" for iel in elements.index]
+    element_buses = copy_buses(net, bus0, element_bus_names)
 
+    # add element name
+    for (iel, row), bus_for_el in zip(elements.iterrows(), element_buses):  # iel == element index
         # Add a string denoting PST in the case of trafo psts
         element_type_suffix = "<PST>" if do_pst else ""
         substation_dict["element_type"].append(element_type + element_type_suffix)
@@ -371,7 +378,7 @@ def create_n_busbar_substation(
     else:
         # Check against existing buses in substations
         # (to prevent double-creating substations)
-        columns = _busbar_columns(net.multi_bb_substation)
+        columns = busbar_columns(net.multi_bb_substation)
         existing_buses = pd.Series(net.multi_bb_substation[columns].to_numpy().ravel()).dropna().tolist()
         existing_buses += net.multi_bb_substation["connected_buses"].explode().tolist()
         if ibus in existing_buses:

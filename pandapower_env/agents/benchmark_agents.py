@@ -10,7 +10,6 @@ from pandapower_env.agents.base_agents import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Iterable
 
     import numpy as np
     from gymnasium import spaces
@@ -25,17 +24,6 @@ class DoNothingAgent(BaseAgent):
     The agent does not change the state of the environment.
     It can be applied to GymEnvPP directly.
     """
-
-    def __init__(self, action_space: spaces.Discrete) -> None:
-        """
-        Nothing needs to be initialized.
-
-        It still takes the action_space as an argument to be compatible with the other agents.
-
-        :param action_space: The action space of the environment.
-        :type action_space: spaces.Discrete
-        """
-        super().__init__(action_space)
 
     def act(self, observation: dict | None = None) -> int:  # noqa: ARG002
         """
@@ -53,15 +41,6 @@ class RandomAgent(BaseAgent):
 
     The agent can be applied to GymEnvPP directly.
     """
-
-    def __init__(self, action_space: spaces.Discrete) -> None:
-        """
-        Initialize the action space.
-
-        :param action_space: The action space of the environment.
-        :type action_space: spaces.Discrete
-        """
-        super().__init__(action_space)
 
     def act(self, observation: dict | None = None) -> np.integer:  # noqa: ARG002
         """
@@ -88,6 +67,7 @@ class GreedyAgent(BaseGreedyAgent):
         n_workers: int | None = None,
         dc_approximation: str = "ac",
         overload_threshold: int = 0,
+        seed: int | None = None,
     ) -> None:
         """
         Greedy agent which directly selects the action with the highest reward.
@@ -103,39 +83,10 @@ class GreedyAgent(BaseGreedyAgent):
         :type selection_criterion: str
         :param feedback_type: The type of feedback to be used.
         :type feedback_type: str
+        :param seed: Seed for the ``max_actions`` subsampling RNG.
+        :type seed: int | None
         """
-        super().__init__(action_space, env_config, feedback_type, n_workers, dc_approximation, overload_threshold)
-
-    def act(
-        self,
-        observation: dict,
-        info: dict,
-        max_actions: int | None = None,
-        action_list: (
-            list[int | np.integer]
-            | Generator[int, None, None]
-            | Iterable[int]
-            | range
-            | None
-        ) = None,
-    ) -> int | np.integer:
-        """
-        Agent acts by selecting the best action.
-
-        For explanations to the parameters, see the BaseGreedyAgent class.
-
-        :param observation: The environment observation at the current state.
-        :type observation: dict
-        :param max_actions: The maximum number of actions to consider.
-        :type max_actions: int | None
-        :param action_list: A subset of actions to evaluate.
-        :type action_list: list[int] | Generator[int, None, None] | Iterable[int] | range | None
-        :return: The best action to take.
-        :rtype: int | np.integer
-        """
-        return super().act(
-            observation,
-            info,
-            max_actions,
-            action_list,
+        super().__init__(
+            action_space, env_config, feedback_type, n_workers, dc_approximation,
+            overload_threshold, seed,
         )

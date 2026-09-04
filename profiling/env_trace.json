@@ -1,0 +1,58 @@
+{
+  "duration_ns": 5795859968,
+  "lanes": [
+    "rank 0 (node4)#0"
+  ],
+  "spans": 26,
+  "arrows": [],
+  "unmatched_waits": [],
+  "dropped_spans": 0,
+  "findings": [],
+  "phases": [
+    {
+      "path": "build_env",
+      "calls": 1,
+      "lanes": 1,
+      "wall_ns": 5054802944,
+      "self_ns": 5054802944,
+      "wait_ns": 67166129,
+      "wait_pct": 1.3
+    },
+    {
+      "path": "step_topology",
+      "calls": 10,
+      "lanes": 1,
+      "wall_ns": 353020672,
+      "self_ns": 353020672,
+      "wait_ns": 2265108,
+      "wait_pct": 0.6
+    },
+    {
+      "path": "reset",
+      "calls": 11,
+      "lanes": 1,
+      "wall_ns": 253911552,
+      "self_ns": 253911552,
+      "wait_ns": 7203991,
+      "wait_pct": 2.8
+    },
+    {
+      "path": "step_donothing",
+      "calls": 3,
+      "lanes": 1,
+      "wall_ns": 96798464,
+      "self_ns": 96798464,
+      "wait_ns": 603027,
+      "wait_pct": 0.6
+    },
+    {
+      "path": "warmup",
+      "calls": 1,
+      "lanes": 1,
+      "wall_ns": 32440576,
+      "self_ns": 32440576,
+      "wait_ns": 263544,
+      "wait_pct": 0.8
+    }
+  ]
+}

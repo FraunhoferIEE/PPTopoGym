@@ -10,7 +10,7 @@ readme = "README.md"
 
 [tool.poetry.dependencies]
 python = "^3.10"
-pandapower = "^3.0"
+pandapower = ">=3.1.2,<3.2"
 matplotlib = "^3.9.2"
 gymnasium = "^1.0.0"
 shapely = "^2.0.6"
@@ -31,6 +31,7 @@ ruff = "^0.5.2"
 pytest-cov = "^6.0.0"
 nbmake = "^1.5.4"
 mypy = "^1.17.1"
+with-line-profiler = "^0.8.2"
 
 [tool.poetry.group.test.dependencies]
 pytest = "^8.2.2"
@@ -66,7 +67,7 @@ include = [
     "rlib_agents/*.py",
 ]
 exclude = [
-    "pandapower_env/rlib_agents/training_scripts",  # this file is not used
+    "**/.ipynb_checkpoints",  # Jupyter auto-save copies, not source
 ]
 
 [tool.ruff.format]
@@ -113,4 +114,6 @@ known-first-party = ["pandapower_env", "tests"]
 # Keep prints in notebooks
 "*.ipynb" = ["T201", "F401"]
 [tool.coverage.run]
-omit = ["*/__init__.py"]
+omit = [
+    "*/__init__.py",
+]

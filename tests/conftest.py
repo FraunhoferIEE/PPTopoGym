@@ -1,7 +1,9 @@
 from collections import defaultdict
+from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
+import pandapower as pp
 import pandas as pd
 import pytest
 import simbench
@@ -13,6 +15,7 @@ from pandapower.networks import case14, case89pegase
 from pandapower_env.action_space.action_space import (
     add_actions_substation_line_switching,
 )
+from pandapower_env.data.example_configs import config_case30
 from pandapower_env.environments.simulation_env import PPTopoGym
 from pandapower_env.rlib_agents.gnn_agents import GINETorchRLModule
 from pandapower_env.substation.create_double_busbar_substation import (
@@ -23,6 +26,91 @@ from pandapower_env.substation.create_double_busbar_substation import (
 )
 from pandapower_env.toolbox.utils_profiles import get_profile_names
 
+# Note: The fixtures are already defined in the test file itself.
+
+# This conftest.py can be used for additional shared configuration
+
+# or fixtures that might be needed across multiple test modules.
+
+
+@pytest.fixture(scope="session")
+def test_project_root() -> Path:
+    """
+    Get the root directory of the test project.
+
+    :return: Path to the project root
+    :rtype: Path
+    """
+    return Path(__file__).parent.parent.resolve()
+
+
+@pytest.fixture()
+def temp_python_file(tmp_path: Path) -> Path:
+    """
+    Create a temporary Python file for testing.
+
+    :param tmp_path: pytest tmp_path fixture
+    :type tmp_path: Path
+    :yield: Path to temporary Python file
+    :rtype: Generator[Path, None, None]
+    """
+    file_path = tmp_path / "temp_module.py"
+    file_path.write_text(
+        "def example_function():\n"
+        "    a = 1\n"
+        "    b = 2\n"
+        "    c = a + b\n"
+        "    return c\n",
+        encoding="utf-8",
+    )
+    return file_path
+    # Cleanup is automatic with tmp_path
+
+
+@pytest.fixture()
+def temp_git_repo(tmp_path: Path) -> Path:
+    """
+    Create a temporary directory structure mimicking a git repository.
+
+    :param tmp_path: pytest tmp_path fixture
+    :type tmp_path: Path
+    :yield: Path to the fake git repo root
+    :rtype: Generator[Path, None, None]
+    """
+    # Create .git directory
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+
+    # Create source directory structure
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+
+    return tmp_path
+
+@pytest.fixture()
+def overloaded_net() -> pandapowerNet:
+    # Create a simple network: Slack -> Transformer -> Line -> Load
+    net = pp.create_empty_network()
+
+    b1 = pp.create_bus(net, vn_kv=110.)
+    b2 = pp.create_bus(net, vn_kv=20.)
+    b3 = pp.create_bus(net, vn_kv=20.)
+
+    pp.create_ext_grid(net, bus=b1)
+
+    # Create a transformer with 20 MVA rating
+    pp.create_transformer(net, hv_bus=b1, lv_bus=b2, std_type="25 MVA 110/20 kV")
+
+    # Create a line with a specific thermal limit (e.g., ~14 MVA)
+    pp.create_line(net, from_bus=b2, to_bus=b3, length_km=1.0, std_type="NA2XS2Y 1x185 RM/25 12/20 kV")
+
+    # Create a massive load (50 MW) to guarantee overload on both elements
+    pp.create_load(net, bus=b3, p_mw=50.0, q_mvar=10.0)
+
+    return net
 
 @pytest.fixture()
 def test_grid() -> pandapowerNet:
@@ -240,6 +328,62 @@ def simenv(test_grid_dbb_plus_simbench) -> PPTopoGym:
     return PPTopoGym(env_config=env_config)
 
 
+
+@pytest.fixture()
+def simenv_oldobs(test_grid_dbb_plus_simbench) -> PPTopoGym:
+    """
+    Fixture for a simple simulation environment.
+
+    :param test_grid_dbb_plus_simbench: Grid with 14 buses, with a double-busbar Dataframe
+        already created, plus simbench-style profiles.
+    :type test_grid_dbb_plus_simbench: pandapowerNet
+    :return: a simple simulation environment
+    :rtype: PPTopoGym
+    """
+    net = test_grid_dbb_plus_simbench
+    action_4 = defaultdict(list, {"action": 4, "disconnect_lines": [1]})
+
+    dict_actions = [
+        {"action": 0, "substations": [], "states": []},
+        {"action": 1, "substations": [0], "states": ["0x110101"]},
+        {
+            "action": 2,
+            "substations": [0, 1],
+            "states": ["0x101101","0x1100"],
+            "lines": [5],
+            "disconnect_lines": [True],
+        },
+        {
+            "action": 3,
+            "substations": [],
+            "states": [],
+            "lines": [5],
+            "disconnect_lines": [False],
+        },
+        {
+            "action": 4,
+            "substations": [],
+            "states": [],
+            "lines": [2],
+            "disconnect_lines": [True],
+        },
+    ]
+
+    dict_actions = [defaultdict(list, action) for action in dict_actions]
+    dict_actions.append(action_4)
+
+    env_config = {
+        "n_episodes": 10,
+        "episode_length": 5,
+        "net": net,
+        "action_space": dict_actions,
+        "nminus1": False,
+        "fix_obs_space": False,
+    }
+
+    return PPTopoGym(env_config=env_config)
+
+
 @pytest.fixture()
 def simenv2(test_grid_dbb_plus_simbench) -> PPTopoGym:
     """
@@ -370,3 +514,8 @@ def sample_observation(simple_gine_module: GINETorchRLModule) -> dict[str, torch
         # Add batch dim =1 for every tensor
         obs_dict[key] = t.unsqueeze(0)
     return obs_dict
+
+@pytest.fixture()
+def simenv30() -> PPTopoGym:
+    cfg = config_case30()
+    return PPTopoGym(cfg)

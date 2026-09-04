@@ -1,0 +1,76 @@
+Runtime 19.63s   Processes 1   Roles profile_step_mix x1
+Host node4   Run 20260902T082809-95d5b9
+
+RESOURCES
+──────────────────────────────────────────────────────────────
+                            used     available      per proc
+CPU  peak              3.8 cores      20 cores          3.75
+CPU  mean              1.2 cores   (6% of box)          1.24
+RAM  peak RSS             1.2 GB        2.0 TB        1.2 GB
+
+  node4: 128 cores (20 available to this job), 2.0 TB RAM
+  per-proc figures are over 1 process(es) (profile_step_mix x1)
+  heaviest process held 1.2 GB RSS against a 1.2 GB mean
+  heaviest process peaked at 3.75 cores against a 3.75 mean
+
+PROFILE_STEP_MIX  (1 process, imbalance 1.00)
+  % of phase wall time at the first branching level
+──────────────────────────────────────────────────────────────
+timed_pass                     36.3%         7.12s
+build_env                      26.0%         5.10s
+step_topology                  23.3%         4.58s
+step_donothing                 13.0%         2.55s
+reset                           1.1%       211.5ms
+warmup                          0.3%        60.4ms
+
+busy (phase open)              99.9%
+working (on CPU)               98.4%
+  busy = a phase was open; working = on a CPU inside one. The gap is waiting.
+
+DOMINANT PHASES          entries        self    wait       p50       p99
+timed_pass                     1       7.12s      1%     7.25s     7.51s
+build_env                      1       5.10s      2%     5.10s     5.36s
+step_topology                129       4.58s      1%    36.1ms    41.8ms
+step_donothing                71       2.55s      1%    36.1ms    41.7ms
+reset                          8     211.5ms      2%    21.7ms    62.6ms
+warmup                         1      60.4ms      1%    60.8ms    62.9ms
+
+STEP_TOPOLOGYS  (129 entries)
+  mean     35.5ms   p50     36.1ms   p95     41.0ms   p99     41.8ms
+
+I/O
+──────────────────────────────────────────────────────────────
+Read (from disk)                       0 B           0 B/s
+Read (from page cache)            114.1 MB
+Write                               4.0 KB         209 B/s
+
+  (no phase open)           r        0 B   w        0 B  cache 66.0 MB
+  build_env                 r        0 B   w        0 B  cache 48.0 MB
+  timed_pass                r        0 B   w     4.0 KB  cache 176.7 KB
+  step_topology             r        0 B   w        0 B  cache 3.4 KB
+  step_donothing            r        0 B   w        0 B  cache 1.4 KB
+
+  read                                                    peak 0 B/s
+  write                            █                      peak 9.8 KB/s
+
+  (bytes come from the OS process counters; attribution to a phase has a
+   resolution of one sample interval. Per-operation attribution needs eBPF.)
+  58% of reads and 0% of writes (syscall layer) moved while
+   no phase was open — too coarse to attribute. Wrap those in io=True.
+
+GPU
+──────────────────────────────────────────────────────────────
+  No GPU data was collected. If this run used one, install nvidia-ml-py and
+  re-read the report without --no-samples; a phase around device work reports
+  submission time until something proves the device was busy.
+
+MEMORY (RSS)
+──────────────────────────────────────────────────────────────
+Current                             1.2 GB
+Peak                                1.2 GB
+Growth over run                   421.5 MB
+Trend                             8.9 MB/s
+
+  growing under build_env                    82.8 MB/s
+  growing under (no phase open)              21.5 MB/s
+  growing under step_donothing              123.0 KB/s

@@ -1,3 +1,7 @@
+import copy
+
+import pytest
+
 from pandapower_env.environments.gym_env_pp import BaseEnvPP
 
 
@@ -31,6 +35,10 @@ def test_gym_env_pp(test_grid_dbb_plus_simbench) -> None:
             return 0.0
 
     my_env = CustomEnv(env_config=env_config)
+    new_config = copy.deepcopy(env_config)
+    new_config["episode_length"] = 0
+    other_env = CustomEnv(env_config=env_config)
+    assert other_env.n_episodes > 0
     my_env.render()
     my_env.reset(options={"index": 4})
     last_value_res = my_env.df_profiles_load_p.iloc[-1, -1]
@@ -47,6 +55,27 @@ def test_gym_env_pp(test_grid_dbb_plus_simbench) -> None:
     my_env.calculate_reward()
     # test the run powerflow method
     assert my_env.run_pf(nminus1=True)
+    # test initialize_info
+    info = my_env.initialize_info()
+    step = info["current_step"]
+    my_env.step(0)
+    step_new = my_env.initialize_info()["current_step"]
+    assert step +1 == step_new
+    # test some errors
+    new_config = copy.deepcopy(env_config)
+    del new_config["net"].profiles
+    with pytest.raises(RuntimeError):
+         CustomEnv(env_config=new_config)
+    new_config = copy.deepcopy(env_config)
+    new_config["episode_length"] = 2**24
+    with pytest.raises(RuntimeError):
+         CustomEnv(env_config=new_config)
+
+
+
+
+
+
 # test if profiles are loaded correctly
 def test_setup_profiles(test_grid_dbb_plus_simbench) -> None:
     net = test_grid_dbb_plus_simbench

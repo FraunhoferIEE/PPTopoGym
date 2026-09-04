@@ -14,6 +14,7 @@ before_script:
   - pip install poetry
   - poetry install
   - poetry add simbench # required for one of the notebooks
+  - poetry add xxhash # required and somehow not in standard
   - source `poetry env info --path`/bin/activate
 
 # execute the type checking and linting

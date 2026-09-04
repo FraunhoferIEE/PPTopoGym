@@ -1,84 +1,42 @@
 from __future__ import annotations
 
 import logging
-import os
 import random
-import sys
-import warnings
-from pathlib import Path
-from typing import TYPE_CHECKING, TextIO
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 import simbench
-from IPython.core.interactiveshell import InteractiveShell
 
 if TYPE_CHECKING:
-    from types import TracebackType
 
-    import pandapower as pp
-    import pandapower.contingency
-    from pandapower import pandapowerNet
-#import
-
-# Suppress warnings
-warnings.simplefilter("ignore")
-
-# Suppress logging
-logging.getLogger().setLevel(logging.CRITICAL)
-
-# Suppress auto-output of expressions in Jupyter cells
-InteractiveShell.ast_node_interactivity = InteractiveShell.ast_node_interactivity.default_value
-
-
-class SuppressOutput:
-    def __enter__(self) -> None:
-        self._stdout = sys.stdout
-        self._stderr = sys.stderr
-        sys.stderr = Path(os.devnull).open("w")  # Suppress stderr
-
-        class PrintFilter:
-            def __init__(self, original_stdout: TextIO) -> None:
-                self._stdout = original_stdout
-                self._needs_newline = False  # Tracks if a newline is needed
-
-            def write(self, message: str) -> None:
-                if message.strip():  # Ignore empty messages
-                    if self._needs_newline:
-                        self._stdout.write("\n")  # Ensure a new line before printing
-                    self._stdout.write(message)
-                    self._needs_newline = not message.endswith(
-                        "\n",
-                    )  # Track if new line is needed
-
-            def flush(self) -> None:
-                self._stdout.flush()
-
-        self._filter = PrintFilter(self._stdout)
-        sys.stdout = self._filter  # Redirect stdout through filter
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> None:
-        sys.stderr.close()  # Close stderr redirection
-        sys.stderr = self._stderr  # Restore stderr
-        sys.stdout = self._stdout  # Restore stdout
-if TYPE_CHECKING:
     import pandapower as pp
     import pandapower.contingency
     from pandapower import pandapowerNet
 logger = logging.getLogger(__name__)
 
+# Process-local cache of the raw Simbench profile library, keyed on the scenario index.
+# ``simbench.get_all_simbench_profiles`` re-reads several CSV files (~35136 x 618 values)
+# on every call and takes ~1.2 s, while being a pure function of the scenario index. Every
+# example config calls it once, so building two environments in one process paid it twice.
+# Kept module-level (not on the net) because it is shared across nets and grids; spawned
+# worker processes simply start with an empty cache.
+_SIMBENCH_PROFILE_CACHE: dict[int, dict[str, pd.DataFrame]] = {}
 
 
+def _all_simbench_profiles_cached(sb_index: int) -> dict[str, pd.DataFrame]:
+    """Return the full Simbench profile library for ``sb_index``, reading it at most once.
 
+    The cached frames are the *shared* originals and must never be handed to callers
+    directly -- :func:`deterministic_profiles` slices and copies them, so a caller that
+    mutates its profiles in place cannot corrupt what the next build sees.
 
-
-
-
+    :param sb_index: The Simbench scenario index (0 low, 1 med, 2 high, ...).
+    :return: The cached dict of raw profile DataFrames, keyed by Simbench table name.
+    """
+    if sb_index not in _SIMBENCH_PROFILE_CACHE:
+        _SIMBENCH_PROFILE_CACHE[sb_index] = simbench.get_all_simbench_profiles(sb_index)
+    return _SIMBENCH_PROFILE_CACHE[sb_index]
 
 
 def deterministic_profiles(net: pp.pandapowerNet, sb_index: int = 0) -> dict[str, pd.DataFrame]:
@@ -98,7 +56,7 @@ def deterministic_profiles(net: pp.pandapowerNet, sb_index: int = 0) -> dict[str
     det_profiles : a dict of dataframes in Simbench style, usable later for PPTopoGym.
 
     """
-    all_profiles = simbench.get_all_simbench_profiles(sb_index)
+    all_profiles = _all_simbench_profiles_cached(sb_index)
     net.gen["name"] = net.gen.index.to_series().apply(lambda x: f"Generator {x}")
     net.sgen["name"] = net.sgen.index.to_series().apply(
         lambda x: f"Static Generator {x}",
@@ -107,10 +65,14 @@ def deterministic_profiles(net: pp.pandapowerNet, sb_index: int = 0) -> dict[str
     n_loads = len(net.load)*2 + 1 if len(net.load) > 0 else 0
     n_gens = len(net.gen) + 1 if len(net.gen) > 0 else 0
     n_sgens = len(net.sgen) + 1 if len(net.sgen) > 0 else 0
+    # ``.copy()`` is required, not defensive style: the frames come from the shared
+    # process-local cache, so returning views would let one net's in-place edit leak into
+    # every net built afterwards. Copying the narrow slice costs ~2 ms against the ~1.2 s
+    # the cache saves.
     det_profiles = {}
-    det_profiles["load"] = all_profiles["load"].iloc[:, :n_loads]
-    det_profiles["renewables"] = all_profiles["renewables"].iloc[:, :n_sgens]
-    det_profiles["powerplants"] = all_profiles["powerplants"].iloc[:, :n_gens]
+    det_profiles["load"] = all_profiles["load"].iloc[:, :n_loads].copy()
+    det_profiles["renewables"] = all_profiles["renewables"].iloc[:, :n_sgens].copy()
+    det_profiles["powerplants"] = all_profiles["powerplants"].iloc[:, :n_gens].copy()
     return det_profiles
 
 def _add_column_names(net: pp.pandapowerNet) -> None:

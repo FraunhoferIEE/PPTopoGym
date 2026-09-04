@@ -4,7 +4,7 @@ import pandas as pd
 from pandapower import pandapowerNet
 
 from pandapower_env.substation.double_busbar_substation import (
-    _busbar_columns,
+    busbar_columns,
     reorder_substation_df,
 )
 from pandapower_env.toolbox.pandapower_tools import (
@@ -144,7 +144,7 @@ def pivot_to_connected_buses(df_elements_plus_switches: pd.DataFrame) -> pd.Data
     # Join the columns together
     df_final = pd.concat([df_bbcols, df_common, df_swcols], axis=1).reset_index(drop=True)
 
-    busbar_cols = _busbar_columns(df_final)
+    busbar_cols = busbar_columns(df_final)
 
     # Change to "Int64" which allows for NA values
     for col in busbar_cols:
@@ -169,7 +169,7 @@ def add_bus_coupler_columns(net: pandapowerNet, df_mbb: pd.DataFrame) -> pd.Data
     bus_sw = net.switch[net.switch["et"] == "b"]
     bus_sw["idx"] = bus_sw.index
 
-    for col1, col2 in itertools.combinations(_busbar_columns(df_mbb), 2):
+    for col1, col2 in itertools.combinations(busbar_columns(df_mbb), 2):
         # extract bus integers from "bus_X"
         x = col1.split("_")[1]
         y = col2.split("_")[1]

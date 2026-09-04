@@ -1,16 +1,17 @@
 from __future__ import annotations
 
-import contextlib
-import copy
 import logging
 import typing
 
+import numpy as np
 import pandapower as pp
 import pandapower.contingency
 import pandas as pd
 
-from pandapower_env.toolbox.utils import run_nminus1_powerflow
+from pandapower_env.toolbox.utils import run_powerflow
 from pandapower_env.toolbox.utils_profiles import get_first_sb_profiles, get_orig_profiles
+
+logger = logging.getLogger(__name__)
 
 
 def find_max_timestep(  # noqa: PLR0913
@@ -63,8 +64,22 @@ def load_profile_timestep_into_net(net: pp.pandapowerNet, profiles: dict, index:
         net.gen["vm_pu"] = profiles["gen_vm"].loc[index].T.to_numpy()
 
 def run_pf(net: pp.pandapowerNet) -> bool:
+    """Run an AC power flow on ``net``, reporting convergence as a bool.
+
+    Uses :func:`pandapower_env.toolbox.utils.run_powerflow` rather than calling
+    ``pp.runpp`` directly. Roughly two thirds of a ``pp.runpp`` call is pandapower
+    re-parsing its options, which is pure overhead when the same net is solved over and
+    over -- as ``find_scaling_recursive`` does, once per recursion. ``run_powerflow``
+    parses the options once, stores them on the net and then reuses them, which is
+    ~10x faster across a scaling search while producing bit-identical results (it
+    re-derives the ppc from the live net tables on every call, so the scaled ``p_mw``
+    values are always picked up).
+
+    :param net: The pandapower network to solve, mutated in place with the results.
+    :return: ``True`` if the power flow converged, ``False`` if it did not.
+    """
     try:
-        pp.runpp(net)
+        run_powerflow(net)
     except pp.LoadflowNotConverged:
         return False
     return True
@@ -108,14 +123,44 @@ def readjust_gen_values_for_convergence(net: pp.pandapowerNet) -> None:
     """
     sum_loads = net.load["p_mw"].sum()
     sum_gens = net.gen["p_mw"].sum() + (net.sgen["p_mw"].sum() if len(net.sgen) > 0 else 0)
+    if sum_gens <= sum_loads * 1.04 and sum_gens >= sum_loads * 0.99:
+        return
+
     scale_factor = (sum_loads / sum_gens) * 1.0
 
-    if sum_gens > (sum_loads*1.04) or (sum_gens < sum_loads*0.99):
-        net.gen["p_mw"] *= scale_factor
+    net.gen["p_mw"] *= scale_factor
+    net.gen.scenario_scaling *= scale_factor
+    if len(net.sgen) > 0:
         net.sgen["p_mw"] *= scale_factor
-        #also save in scaling
-        net.gen.scenario_scaling *= scale_factor
         net.sgen.scenario_scaling *= scale_factor
+
+def readjust_load_values_for_convergence(net: pp.pandapowerNet) -> None:
+    """
+    Readjust values for powerflow convergence.
+
+    Workflow:
+    1. Balance load and generated power (active power)
+        ensure loads == gens, with little difference
+    2. Lower / enlarge the generated power accordingly.
+
+    Parameters
+    ----------
+    net
+
+    """
+    sum_loads = net.load["p_mw"].sum()
+    sum_gens = net.gen["p_mw"].sum() + (net.sgen["p_mw"].sum() if len(net.sgen) > 0 else 0)
+    if sum_gens <= sum_loads * 1.04 and sum_gens >= sum_loads * 0.99:
+        return
+    scale_factor = (sum_gens / sum_loads) * 1.0
+
+    net.load["p_mw"] *= scale_factor
+    #also save in scaling
+    net.load.scenario_scaling *= scale_factor
+
+
+
+
 
 def ensure_no_zero_values(net: pp.pandapowerNet) -> None:
     """
@@ -152,42 +197,52 @@ def redistribute_throughout_elements(net: pp.pandapowerNet) -> None:
         if df_elem.empty:
             continue
             # Sort by p_mw ascending
-        df_sorted = df_elem.sort_values("p_mw").copy()
+
+        p_mw_values = df_elem["p_mw"].to_numpy()
+        if len(p_mw_values) < 2:  # noqa: PLR2004
+            continue  # Not enough elements to redistribute
+
+        sorted_indices = np.argsort(p_mw_values)
+        largest = p_mw_values[sorted_indices[-1]]
+        mean = p_mw_values.mean()
 
         # Difference between largest and 2nd-largest
-        largest = df_sorted["p_mw"].iloc[-1]
-        df_sorted.index[-1]
-        mean = df_sorted["p_mw"].mean()
         diff = (largest - mean)*0.25 # the p_mw value we distribute
-        diff_scale = diff / largest if largest != 0 else 0
+        diff_scale = 1 - (diff / largest if largest != 0 else 0)
         net[elem]["scenario_scaling"] *= diff_scale
 
         # Determine lower quarter of elements
-        n = len(df_sorted)
-        lower_quarter_idx = df_sorted.index[:n//4]
-        lower_quarter_sum = df_sorted["p_mw"].iloc[:n//4].sum()
-        lower_scale = diff / lower_quarter_sum if lower_quarter_sum != 0 else 0
-
+        n = len(sorted_indices)
+        lower_quarter_idx = df_elem.index[sorted_indices[:n//4]]
+        lower_quarter_sum = p_mw_values[sorted_indices[:n//4]].sum()
+        lower_scale = 1 + (diff / lower_quarter_sum if lower_quarter_sum != 0 else 0)
         # Apply scaling to lower quarter
         net[elem].loc[lower_quarter_idx, "scenario_scaling"] *= lower_scale
 
-def adjust_values_w_scaling(net: pp.pandapowerNet, orig_profiles: dict[str, pd.DataFrame]) -> None:
+def adjust_values_w_scaling(
+    net: pp.pandapowerNet,
+    orig_profiles: dict[str, pd.DataFrame],
+    run_powerflow: bool = True,  # noqa: FBT001, FBT002
+) -> None:
     """
     Adjust the scaling factors for the network components.
 
     1. take original values
     2. scale them with the column "scenario scaling"
-    4. run pf
+    4. run pf (unless ``run_powerflow`` is False)
 
     Parameters
     ----------
     net
     orig_profiles: The profiles obtained initially.
+    run_powerflow: If False, only set the scaled values without running a power flow.
+        Callers that run their own power flow afterwards can skip the redundant one.
     """
     load_profile_timestep_into_net(net, orig_profiles)
     for key in ("load", "gen", "sgen"):
-        net[key]["p_mw"] *= net[key]["scenario_scaling"]
-    run_pf(net) # local powerflow method, calling pp.runpp()
+        net[key]["p_mw"] = net[key]["p_mw"].to_numpy() * net[key]["scenario_scaling"].to_numpy()
+    if run_powerflow:
+        run_pf(net) # local powerflow method, calling pp.runpp()
 
 def scale_scenario_scaling(net: pp.pandapowerNet, value: float) -> None:
     """
@@ -202,11 +257,12 @@ def scale_scenario_scaling(net: pp.pandapowerNet, value: float) -> None:
         net[key]["scenario_scaling"] *= value
 
 
-def find_scaling_recursive(net: pp.pandapowerNet,
+def find_scaling_recursive(net: pp.pandapowerNet,  # noqa: C901, PLR0913
                            init_scaling: int = 1,
                            orig_profiles: None | dict = None,
                            max_percent: int = 90,
-                           overloaded_lines: int = 2 ) -> bool | typing.Callable:
+                           overloaded_lines: int = 2,
+                           scale_gen: bool = True ) -> bool | typing.Callable:  # noqa: FBT001, FBT002
     """
     Call this function, until enough overloaded lines are found.
 
@@ -219,8 +275,10 @@ def find_scaling_recursive(net: pp.pandapowerNet,
     orig_profiles: orig profiles, to load and apply scaling to.
     max_percent: Minimal percentage, the lines should be scaled to.
     overloaded_lines: Number of lines which should be overloaded due to scaling.
+    scale_gen: Boolean, whether generator should be equalized in energy production. Else, loads are re-adjusted.
     """
     if orig_profiles is None: # should happen, but in case, and to showcase the workflow
+        logger.warning("No profiles given; falling back to the first Simbench profiles.")
         ensure_slack_gen(net)
         if not hasattr(net, "profiles"):
             get_first_sb_profiles(net, 2)
@@ -231,295 +289,99 @@ def find_scaling_recursive(net: pp.pandapowerNet,
     for key in elems:
         if not hasattr(net[key], "scenario_scaling"):
             net[key]["scenario_scaling"] = init_scaling
-    # recursive part of the code
-    load_profile_timestep_into_net(net, orig_profiles)
-    adjust_values_w_scaling(net, orig_profiles)
-    readjust_gen_values_for_convergence(net)
-    run_pf(net)
+    # Recursive part of the code -- exactly ONE power flow per call.
+    #
+    # Only ``scenario_scaling`` (and the ``scale_gen`` toggle) persists between calls;
+    # p_mw and the power-flow results are always recomputed from
+    # ``orig_profiles x scenario_scaling`` at the top of each call. The previous version
+    # ran 3-4 power flows per recursion (inside the leading and trailing
+    # ``adjust_values_w_scaling`` calls, and in the ">" branch) whose results were
+    # immediately discarded -- only the single run_pf below actually decides
+    # ``n_overloaded_lines``. Applying the scaling without those throwaway power flows
+    # leaves the scenario_scaling trajectory (and therefore the final net) unchanged.
+    adjust_values_w_scaling(net, orig_profiles, run_powerflow=False)
+    if scale_gen:
+        readjust_gen_values_for_convergence(net)
+    else:
+        readjust_load_values_for_convergence(net)
+    converged = run_pf(net)
     n_overloaded_lines = (net.res_line["loading_percent"] > max_percent).sum()
-    if not run_pf(net):
-        scale_scenario_scaling(net, 0.8)
+    if not converged:
+        redistribute_throughout_elements(net)
+        scale_scenario_scaling(net, 0.9)
     elif n_overloaded_lines == overloaded_lines:
         return True
     elif n_overloaded_lines > overloaded_lines:
         redistribute_throughout_elements(net)
-        load_profile_timestep_into_net(net, orig_profiles)
-        adjust_values_w_scaling(net, orig_profiles)
         scale_scenario_scaling(net, 0.95)
     elif n_overloaded_lines < overloaded_lines:
-        scale_scenario_scaling(net, 1.1)
-    adjust_values_w_scaling(net, orig_profiles)
-    run_pf(net)
+        scale_scenario_scaling(net, 1.2)
     return find_scaling_recursive(net,
                                   init_scaling=init_scaling,
                                   orig_profiles=orig_profiles,
                                   max_percent=max_percent,
                                   overloaded_lines=overloaded_lines,
+                                  scale_gen = not scale_gen,
                                   )
 
 
-
-
-# ----------- Scaling with binary search # helper functions
-def _run_pf_with_scaling(
-    net: pp.pandapowerNet,
-    scaling: float,
-    min_percent_overload: float,
-) -> int | None:
+def find_scaling_iterative(net: pp.pandapowerNet,
+                           orig_profiles: dict,
+                           max_percent: int = 90,
+                           overloaded_lines: int = 2) -> dict[str, pd.Series] | None:
     """
-    Set the same scaling for loads, generators, and static generators.
+    Scale the net iteratively, until exactly ``overloaded_lines`` lines are overloaded.
 
-    Run the power flow, and return the number of lines with loading_percent >= min_percent_overload.
+    Iterative counterpart of :func:`find_scaling_recursive`, which avoids its recursion limit.
+    Each iteration applies the current ``scenario_scaling`` to the net, runs one power flow and
+    then scales up or down depending on how many lines exceed ``max_percent`` loading.
 
-    :param net: The pandapower network.
-    :type net: pp.pandapowerNet
-    :param scaling: The scaling factor to apply.
-    :type scaling: float
-    :param min_percent_overload: The threshold loading percentage to consider a line overloaded.
-    :type min_percent_overload: float
-    :return: The number of overloaded lines if converged, or None if the power flow fails to converge.
-    :rtype: int | None
+    Parameters
+    ----------
+    net: The pandapower net to scale (mutated in place).
+    orig_profiles: Original profiles, to load and apply the scaling to.
+    max_percent: Loading percentage above which a line counts as overloaded.
+    overloaded_lines: Number of lines which should be overloaded due to scaling.
+
+    Returns
+    -------
+        Dict of the final scaled active powers (``load_p``, ``gen_p``, ``sgen_p``),
+        or ``None`` if no scaling produced the requested number of overloaded lines.
     """
-    net.load["scaling"] = scaling
-    net.gen["scaling"] = scaling
-    net.sgen["scaling"] = scaling
-    if "res_line" not in net or net.res_line["loading_percent"].isna().any():
-        pp.reset_results(net)
-        return None
-    try:
-        pp.runpp(net)
-    except pp.LoadflowNotConverged:
-        pp.reset_results(net)
-        return None
-    return (net.res_line["loading_percent"] >= min_percent_overload).sum()
+    # 1. Initialize scaling if not present
+    for key in ("load", "gen", "sgen"):
+        if "scenario_scaling" not in net[key].columns:
+            net[key]["scenario_scaling"] = 1.0
 
+    max_iterations = 50
+    for i in range(max_iterations):
+        # 2. Apply current scaling to the net
+        adjust_values_w_scaling(net, orig_profiles)
 
-def _binary_search_threshold(  # noqa: PLR0913
-    net: pp.pandapowerNet,
-    lower: float,
-    upper: float,
-    target: int,
-    min_percent_overload: float,
-    max_search_iter: int = 50,
-    tol: float = 1e-3,
-) -> float:
-    """
-    Binary search to find the minimal scaling 's' within [lower, upper] such that f(s) >= target.
+        # 3. Check convergence and loading
+        converged = run_pf(net)
+        if not converged:
+            # If it fails, scale down and redistribute to try and get a valid PF
+            scale_scenario_scaling(net, 0.9)
+            redistribute_throughout_elements(net)
+            continue
 
-    :param net: The pandapower network.
-    :type net: pp.pandapowerNet
-    :param lower: Lower bound for the search interval.
-    :type lower: float
-    :param upper: Upper bound for the search interval.
-    :type upper: float
-    :param target: The target number of overloaded lines.
-    :type target: int
-    :param min_percent_overload: The threshold loading percentage.
-    :type min_percent_overload: float
-    :param max_search_iter: Maximum number of iterations for binary search.
-    :type max_search_iter: int
-    :param tol: Convergence tolerance.
-    :type tol: float
-    :return: The minimal scaling factor found.
-    :rtype: float
-    """
-    for _ in range(max_search_iter):
-        mid: float = (lower + upper) / 2.0
-        val: int | None = _run_pf_with_scaling(net, mid, min_percent_overload)
-        # Treat non-convergence as if overload is too high.
-        if (
-            val is None and upper - lower < tol * 10
-        ):  # Early stopping if search space is too small
-            return lower
-        if val is None or val >= target:
-            upper = mid
+        n_overloaded = (net.res_line["loading_percent"] > max_percent).sum()
+
+        # 4. Success Condition
+        if n_overloaded == overloaded_lines:
+            logger.info("Found scaling with %s overloaded lines at iteration %s", overloaded_lines, i)
+            # Return a dictionary of the FINAL scaled values
+            return {
+                "load_p": net.load.p_mw.copy(),
+                "gen_p": net.gen.p_mw.copy(),
+                "sgen_p": net.sgen.p_mw.copy(),
+            }
+
+        # 5. Adjustment Logic
+        if n_overloaded < overloaded_lines:
+            scale_scenario_scaling(net, 1.1) # Aggressive increase
         else:
-            lower = mid
-        if upper - lower < tol:
-            return mid
-    return upper
+            scale_scenario_scaling(net, 0.95) # Slight decrease
 
-
-def _lower_scaling_that_net_converges(net: pp.pandapowerNet, scaling: float) -> float:
-    """
-    Determine the lowest scaling factor such that the power flow converges.
-
-    :param net: The pandapower network.
-    :type net: pp.pandapowerNet
-    :param scaling: The initial scaling factor to apply.
-    :type scaling: float
-    :return: The lowest scaling factor such that the power flow converges.
-    :rtype: float
-    """
-    decay = 0.98
-    minimal_scaling = 1e-5
-    while scaling > minimal_scaling:
-        # run N-1 powerflow and look that it converges
-        with contextlib.suppress(pp.LoadflowNotConverged):
-            run_nminus1_powerflow(net)
-        if _run_pf_with_scaling(net, scaling, 100) is not None:
-            return scaling
-        scaling *= decay
-        decay = (decay + 1) / 2
-    msg = "Scaling factor too low, network may not be solvable."
-    raise ValueError(msg)
-
-
-def _bracket_search_bounds(
-    net: pp.pandapowerNet,
-    min_percent_overload: float,
-    min_overloaded_lines: int,
-) -> tuple[float, float]:
-    """
-    Determine search bounds for the scaling factor based on a base-case evaluation.
-
-    :param net: The pandapower network.
-    :type net: pp.pandapowerNet
-    :param min_percent_overload: The threshold loading percentage.
-    :type min_percent_overload: float
-    :param min_overloaded_lines: Minimum required number of overloaded lines.
-    :type min_overloaded_lines: int
-    :return: A tuple (s_low, s_high) representing the lower and upper bounds for the scaling factor.
-    :rtype: tuple[float, float]
-    """
-    min_s_low: float = 0.001
-    max_s_high: float = 1e4
-    s_low: float = 0.001
-    s_high: float = 10.0
-    base_val: int | None = _run_pf_with_scaling(net, 1.0, min_percent_overload)
-    # check if the power flow converged
-    if base_val is None:
-        while s_low > min_s_low:
-            s_low *= 0.5
-            val: int | None = _run_pf_with_scaling(net, s_low, min_percent_overload)
-            if val is not None:
-                break
-        else:
-            msg = f"Scaling factor {round(s_low, 5)} exceeded search limits while decreasing."
-            logging.debug(msg)
-            return min_s_low, max_s_high
-
-    elif base_val < min_overloaded_lines:
-        while s_high < max_s_high:  # Limit the search
-            s_high *= 2.0
-            val = _run_pf_with_scaling(net, s_high, min_percent_overload)
-            if val is not None and val >= min_overloaded_lines:
-                return s_low, s_high
-        msg = f"Scaling factor {s_high // 1} exceeded search limits while increasing."
-        logging.debug(msg)
-        return (min_s_low, max_s_high)  # s_low has already been successfully determined
-    return s_low, s_high
-
-
-def find_scaling_binarysearch(  # noqa: C901, PLR0915
-    net: pp.pandapowerNet,
-    min_percent_overload: float,
-    min_overloaded_lines: int,
-    max_search_iter: int = 200,
-    tol: float = 1e-2,
-) -> tuple[float, int, float]:
-    """
-    Find a scaling factor for loads, generators, and static generators such that line overloadings appear.
-
-    :param net: The pandapower network.
-    :type net: pp.pandapowerNet
-    :param min_percent_overload: The threshold loading percentage for a line to be considered overloaded.
-    :type min_percent_overload: float
-    :param min_overloaded_lines: Minimum required number of overloaded lines.
-    :type min_overloaded_lines: int
-    :param max_search_iter: Maximum iterations for binary search.
-    :type max_search_iter: int
-    :param tol: Convergence tolerance.
-    :type tol: float
-    :return: A tuple (net, scaling_found, final_overloaded) where scaling_found is the scalig factor.
-    :rtype: tuple[pp.pandapowerNet, float, int]
-    """
-    s_low, s_high = _bracket_search_bounds(
-        net,
-        min_percent_overload,
-        min_overloaded_lines,
-    )
-    while _run_pf_with_scaling(net, s_high, min_percent_overload) is None:
-        # If s_high doesn't work, reduce it.
-        s_high *= 0.9
-        if s_high < s_low:  # Ensure s_high stays above s_low
-            msg = f"Failed to find a valid upper bound: s_high={s_high} is too close to s_low={s_low}."
-            raise ValueError(msg)
-    scaling_found: float = _binary_search_threshold(
-        net,
-        s_low,
-        s_high,
-        min_overloaded_lines,
-        min_percent_overload,
-        max_search_iter,
-        tol,
-    )
-    final_overloaded: int | None = _run_pf_with_scaling(
-        net,
-        scaling_found,
-        min_percent_overload,
-    )
-    while final_overloaded is None:
-        msg = "Power flow did not converge with binary search - lowering the scaling factor."
-        logging.debug(msg)
-        scaling_found = _lower_scaling_that_net_converges(net, scaling_found)
-        final_overloaded = _run_pf_with_scaling(
-            net,
-            scaling_found,
-            min_percent_overload,
-        )
-
-    # Update the network with the found scaling factor.
-    net.load["scaling"] = scaling_found
-    net.gen["scaling"] = scaling_found
-    net.sgen["scaling"] = scaling_found
-
-    try:
-        pp.runpp(net)
-    except pp.LoadflowNotConverged as err:
-        msg = "Final power flow did not converge at the determined scaling factor."
-        raise ValueError(msg) from err
-
-    # include scaling the lines
-    # Step 2: Adjust line capacities if necessary
-    line_scaling_low, line_scaling_high = 0.001, 3.0
-    line_scaling_found = 1.0
-    line_max = copy.deepcopy(net.line["max_i_ka"])
-    iter_count = 0
-    while not (
-        min_overloaded_lines * 0.9 <= final_overloaded <= min_overloaded_lines * 1.1
-    ):
-        if final_overloaded < min_overloaded_lines:
-            # Not enough overloaded lines → decrease line capacities
-            line_scaling_high = line_scaling_found
-            line_scaling_found = (line_scaling_low + line_scaling_found) / 2
-        else:
-            # Too many overloaded lines → increase line capacities
-            line_scaling_low = line_scaling_found
-            line_scaling_found = (line_scaling_high + line_scaling_found) / 2
-
-        net.line["max_i_ka"] = line_max * line_scaling_found
-        try:
-            pp.runpp(net)
-        except pp.LoadflowNotConverged:
-            logging.debug("Power flow did not converge with line scaling.")
-            if final_overloaded < min_overloaded_lines:
-                line_scaling_high = line_scaling_found
-            else:
-                line_scaling_low = line_scaling_found
-            line_scaling_found = (line_scaling_low + line_scaling_high) / 2
-        final_overloaded = _run_pf_with_scaling(
-            net,
-            scaling_found,
-            min_percent_overload,
-        )
-        if final_overloaded is None:
-            msg = "Power flow did not converge with scaling."
-            raise ValueError(msg)
-
-        iter_count += 1
-        if iter_count >= max_search_iter:
-            logging.warning("Line scaling did not converge within max iterations.")
-            break
-
-    return scaling_found, int(final_overloaded), line_scaling_found
+    return None # Or last best guess

@@ -15,6 +15,37 @@ def _net_to_blob(net: pp.pandapowerNet) -> bytes:
     return buf.getvalue().encode("utf-8")
 
 
+def test_ensure_net_from_blob_rebuilds_for_different_blob() -> None:
+    """The process-local net cache must key on the blob, not just ``_NET is None``.
+
+    Regression for an order-dependent crash: the first grid deserialized in a process
+    was cached and reused for *every* later blob, so a topology snapshot from a
+    different grid (more switches) got applied to the stale net (fewer switches),
+    raising ``Length of values (N) does not match length of index (M)``.
+    """
+    from pandapower.networks import case14, case30
+
+    gw._NET = None
+    gw._NET_KEY = None
+    try:
+        net_a, net_b = case14(), case30()
+        blob_a, blob_b = _net_to_blob(net_a), _net_to_blob(net_b)
+        assert len(net_a.bus) != len(net_b.bus)
+
+        got_a = gw._ensure_net_from_blob(blob_a)
+        assert len(got_a.bus) == len(net_a.bus)
+
+        # A different blob must rebuild rather than serve the cached net_a.
+        got_b = gw._ensure_net_from_blob(blob_b)
+        assert len(got_b.bus) == len(net_b.bus)
+
+        # The same blob reuses the cached object (identity), avoiding re-deserialization.
+        assert gw._ensure_net_from_blob(blob_b) is got_b
+    finally:
+        gw._NET = None
+        gw._NET_KEY = None
+
+
 def test_apply_topology_with_real_net(test_grid) -> None:
     """_apply_topology should correctly set fields in a real pandapowerNet."""
     net = test_grid
@@ -125,3 +156,56 @@ def test_evaluate_action_real_pf(test_grid_dbb_plus_simbench) -> None:
     assert np.all(np.isfinite(line_loadings))
     assert np.isfinite(result["reward"])
     assert np.isfinite(result["max_loading"])
+
+
+def test_evaluate_action_grid_snapshot_matches_packed_topology(test_grid_dbb_plus_simbench) -> None:
+    """Restoring state from a ``{element: DataFrame}`` snapshot scores an action identically.
+
+    Two ways to hand ``evaluate_action`` the pre-action grid: the packed numpy arrays the greedy
+    agents build, or an element-table snapshot of the columns an action may change. Both describe
+    the same topology, so both must produce the same power flow.
+    """
+    net = test_grid_dbb_plus_simbench
+    blob = _net_to_blob(net)
+
+    base_topology = {
+        "switch_closed": net.switch["closed"].to_numpy(dtype=np.int8),
+        "line_in_service": net.line["in_service"].to_numpy(dtype=np.int8),
+    }
+    grid_snapshot = {
+        "switch": net.switch[["closed"]].copy(),
+        "line": net.line[["in_service"]].copy(),
+        # An element the deserialized net does not carry must be skipped, not raise.
+        "not_a_table": net.line[["in_service"]].copy(),
+    }
+    action_row: dict = {}
+
+    packed = gw.evaluate_action(
+        static_net_blob=blob, base_topology=base_topology, action_row=action_row, pf_mode="ac",
+    )
+    snapshotted = gw.evaluate_action(
+        static_net_blob=blob, grid_snapshot=grid_snapshot, action_row=action_row, pf_mode="ac",
+    )
+
+    assert snapshotted["crashed"] == packed["crashed"]
+    assert snapshotted["max_loading"] == packed["max_loading"]
+    np.testing.assert_array_equal(snapshotted["line_loadings"], packed["line_loadings"])
+
+
+def test_evaluate_action_grid_snapshot_restores_a_changed_switch(test_grid_dbb_plus_simbench) -> None:
+    """A snapshot overwrites what an earlier action left behind, dtypes intact."""
+    net = test_grid_dbb_plus_simbench
+    grid_snapshot = {"switch": net.switch[["closed"]].copy()}
+    first_switch = net.switch.index[0]
+
+    dirty = pp.pandapowerNet(net)  # a shallow view is enough: we only read the blob below
+    dirty_blob = _net_to_blob(dirty)
+    worker_net = gw._ensure_net_from_blob(dirty_blob)
+    worker_net.switch.loc[first_switch, "closed"] = not net.switch.loc[first_switch, "closed"]
+
+    gw._apply_grid_snapshot(worker_net, grid_snapshot)
+
+    assert worker_net.switch["closed"].dtype == net.switch["closed"].dtype
+    np.testing.assert_array_equal(
+        worker_net.switch["closed"].to_numpy(), net.switch["closed"].to_numpy(),
+    )

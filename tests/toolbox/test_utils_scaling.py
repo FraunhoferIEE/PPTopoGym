@@ -1,17 +1,13 @@
-import pandapower as pp
 
 from pandapower_env.toolbox.utils_profiles import (
     get_first_sb_profiles,
     get_orig_profiles,
 )
 from pandapower_env.toolbox.utils_scaling import (
-    _bracket_search_bounds,
-    _run_pf_with_scaling,
     adjust_values_w_scaling,
     ensure_no_zero_values,
     ensure_slack_gen,
     find_max_timestep,
-    find_scaling_binarysearch,
     find_scaling_recursive,
     load_profile_timestep_into_net,
     readjust_gen_values_for_convergence,
@@ -121,31 +117,3 @@ def test_find_scaling_recursive(test_grid) -> None:
 
 
 
-def test_run_pf_with_scaling(test_grid_dbb_plus_simbench) -> None:
-    """Test the run_pf_with_scaling function."""
-    net = test_grid_dbb_plus_simbench
-    return_value = _run_pf_with_scaling(net=test_grid_dbb_plus_simbench, scaling=1.0, min_percent_overload=100)
-    assert return_value is None or return_value == 0
-    pp.runpp(net)
-    return_low_scaling = _run_pf_with_scaling(
-        net=test_grid_dbb_plus_simbench, scaling=0.0000001, min_percent_overload=0.1,
-    )
-    assert return_low_scaling is None or return_low_scaling >= 0
-
-
-def test_bracket_search_bounds(test_grid_dbb_plus_simbench) -> None:
-    net = test_grid_dbb_plus_simbench
-    low, high = _bracket_search_bounds(net=net, min_percent_overload=0.1, min_overloaded_lines=1)
-    assert low < high
-
-
-def test_find_scaling_binarysearch(test_grid_dbb_plus_simbench) -> None:
-    net = test_grid_dbb_plus_simbench
-    goal_overloaded = 1
-    scaling_found, final_overloaded, line_scaling_found = find_scaling_binarysearch(net=net,
-                                                                       min_percent_overload=0.1,
-                                                                       min_overloaded_lines=goal_overloaded,
-                                                                       )
-    assert final_overloaded >= goal_overloaded
-    assert scaling_found > 0
-    assert line_scaling_found > 0

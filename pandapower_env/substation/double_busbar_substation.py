@@ -26,6 +26,7 @@ to the switches connecting the `connected_buses` to bus_0 or bus_1 (respectively
 Switch b01_switch connects bus_0 and bus_1 together.
 """
 
+import functools
 import re
 
 import pandas as pd
@@ -37,44 +38,41 @@ from pandapower_env.substation.substation_bitsets import (
 )
 
 
-def _bus_coupler_switch_columns(df_mbb: pd.DataFrame) -> list[str]:
-    """
-    Find all bus coupler columns (of the format b01_switch, b45_switch, etc.).
+@functools.lru_cache(maxsize=None)
+def _classified_columns(columns: tuple[str, ...]) -> tuple[tuple[str, ...], ...]:
+    """Split substation-table column names into (busbar, bus-coupler switch, element switch).
 
-    :param df_mbb: The multi-busbar dataframe
-    :type df_mbb: pd.DataFrame
-    :return:
-    :rtype: list[str]
+    Cached on the column tuple because this is a pure function of the table's *layout*, which
+    never changes while actions are being generated -- and it used to be re-derived with a
+    regex over every column four times per candidate action, which dominated
+    ``verify_all_actions`` on large grids.
+
+    :param columns: the substation DataFrame's column names.
+    :type columns: tuple[str, ...]
+    :return: (``bus_N``, ``bN_switch``, ``bN_switches``) column-name tuples.
+    :rtype: tuple[tuple[str, ...], ...]
     """
     # The ^ denotes the beginning of the string, $ the end of the string, and \d a number
-    return [col for col in df_mbb.columns if re.match(r"^b\d+_switch$", col)]
+    return (
+        tuple(col for col in columns if re.match(r"^bus_\d+$", col)),
+        tuple(col for col in columns if re.match(r"^b\d+_switch$", col)),
+        tuple(col for col in columns if re.match(r"^b\d+_switches$", col)),
+    )
+
+
+def _bus_coupler_switch_columns(df_mbb: pd.DataFrame) -> list[str]:
+    """Find all bus coupler columns (of the format b01_switch, b45_switch, etc.)."""
+    return list(_classified_columns(tuple(df_mbb.columns))[1])
 
 
 def _element_switch_columns(df_mbb: pd.DataFrame) -> list[str]:
-    """
-    Find all switch columns (of the format b1_switches, b2_switches, etc.).
-
-    :param df_mbb: The multi-busbar dataframe
-    :type df_mbb: pd.DataFrame
-    :return:
-    :rtype: list[str]
-    """
-    # The ^ denotes the beginning of the string, $ the end of the string, and \d a number
-    return [col for col in df_mbb.columns if re.match(r"^b\d+_switches$", col)]
+    """Find all switch columns (of the format b1_switches, b2_switches, etc.)."""
+    return list(_classified_columns(tuple(df_mbb.columns))[2])
 
 
-def _busbar_columns(df_mbb: pd.DataFrame) -> list[str]:
-    """
-    Find all busbar columns (of the format bus_0, bus_1, etc.).
-
-    :param df_mbb: The multi-busbar dataframe
-    :type df_mbb: pd.DataFrame
-    :return:
-    :rtype: list[str]
-    """
-    # The ^ denotes the beginning of the string, $ the end of the string, and \d a number
-
-    return [col for col in df_mbb.columns if re.match(r"^bus_\d+$", col)]
+def busbar_columns(df_mbb: pd.DataFrame) -> list[str]:
+    """Find all busbar columns (of the format bus_0, bus_1, etc.)."""
+    return list(_classified_columns(tuple(df_mbb.columns))[0])
 
 
 def reorder_substation_df(df_mbb: pd.DataFrame) -> list[str]:
@@ -95,7 +93,7 @@ def reorder_substation_df(df_mbb: pd.DataFrame) -> list[str]:
         "connected_elements",
     ]
 
-    col_order = _busbar_columns(df_mbb) + bus_couplers_cols + other_columns + _element_switch_columns(df_mbb)
+    col_order = busbar_columns(df_mbb) + bus_couplers_cols + other_columns + _element_switch_columns(df_mbb)
     return df_mbb[col_order]
 
 
@@ -110,11 +108,23 @@ def get_all_substation_switches(net: pandapowerNet, i_sub: int) -> list[int]:
     :return: The index of each of the switches in the substation
     :rtype: list of int
     """
-    sub = net.multi_bb_substation.loc[i_sub]
+    df_mbb = net.multi_bb_substation
+    return _all_substation_switches_row(
+        df_mbb.loc[i_sub], _element_switch_columns(df_mbb), _bus_coupler_switch_columns(df_mbb),
+    )
 
-    ele_switches = sub[_element_switch_columns(net.multi_bb_substation)].dropna().sum()
-    coupler_switches = sub[_bus_coupler_switch_columns(net.multi_bb_substation)].dropna().tolist()
 
+def _all_substation_switches_row(
+    sub: pd.Series, element_columns: list[str], coupler_columns: list[str],
+) -> list[int]:
+    """Every switch of one substation, given its already-fetched table row.
+
+    Split from :func:`get_all_substation_switches` so callers that already hold the row (and
+    the classified column names) do not pay for another ``.loc`` row build -- three of them
+    used to happen per candidate action.
+    """
+    ele_switches = sub[element_columns].dropna().sum()
+    coupler_switches = sub[coupler_columns].explode().dropna().tolist()
     return ele_switches + coupler_switches
 
 
@@ -129,8 +139,11 @@ def is_fully_connected(net: pandapowerNet, i_sub: int, hexset: str) -> bool:
     :param hexset: hexset containing busbar assignment
     :type hexset: str | int (can be 0)
     """
-    sub = net.multi_bb_substation.loc[i_sub]
+    return _is_fully_connected_row(net.multi_bb_substation.loc[i_sub], hexset)
 
+
+def _is_fully_connected_row(sub: pd.Series, hexset: str) -> bool:
+    """Whether a hexset leaves every non-PST element of one substation on the same busbar."""
     non_pst_elements = [x != "trafo_pst" for x in sub.element_type]
     hexset_nopst = [x for x, y in zip(hexset.removeprefix("0x"), non_pst_elements) if y]
 
@@ -153,19 +166,25 @@ def get_list_of_closed_and_open_substation_switches(
     :return tuple: List of closed (first index of tuple) and open (2nd index of tuple) switches
     :rtype: tuple[list[float], list[float]]
     """
-    sub = net.multi_bb_substation.loc[i_sub]
+    df_mbb = net.multi_bb_substation
+    # One row build and one column classification for the whole call: this runs once per
+    # candidate action during action-space generation, and used to fetch the row three times
+    # (here, in is_fully_connected and in get_all_substation_switches).
+    sub = df_mbb.loc[i_sub]
+    coupler_columns = _bus_coupler_switch_columns(df_mbb)
     nbits = len(sub.connected_buses)
     nbusbars = sub.n_busbars_in_substation
 
-    if is_fully_connected(net, i_sub, hexset):
-        return get_all_substation_switches(net, i_sub), []
+    if _is_fully_connected_row(sub, hexset):
+        return _all_substation_switches_row(sub, _element_switch_columns(df_mbb), coupler_columns), []
 
     open_switches = []
     closed_switches = []
 
     # Do not forget to open the switches between
     # bus 0 and bus 1 (etc.) if substation is not fully connected.
-    coupler_switches = sub[_bus_coupler_switch_columns(net.multi_bb_substation)].dropna().tolist()
+    # "explode" is to accommodate list of busbar couplers in one cell.
+    coupler_switches = sub[coupler_columns].explode().dropna().tolist()
     open_switches.extend(coupler_switches)
 
     for ibusbar in range(nbusbars):

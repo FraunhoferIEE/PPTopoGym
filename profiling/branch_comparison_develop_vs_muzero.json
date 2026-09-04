@@ -1,0 +1,135 @@
+{
+  "grids": {
+    "grid_14": {
+      "switching_action": 5,
+      "info_develop": {
+        "size": 14,
+        "n_bus": 14,
+        "n_line": 15,
+        "n_trafo": 5,
+        "n_load": 11,
+        "n_gen": 4,
+        "n_substation": 7,
+        "n_switch": 79,
+        "n_bus_expanded": 57,
+        "n_actions_used": 175
+      },
+      "info_develop_muzero": {
+        "size": 14,
+        "n_bus": 14,
+        "n_line": 15,
+        "n_trafo": 5,
+        "n_load": 11,
+        "n_gen": 4,
+        "n_substation": 7,
+        "n_switch": 79,
+        "n_bus_expanded": 57,
+        "n_actions_used": 175
+      },
+      "develop": {
+        "step.reset": 43.242018669843674,
+        "step.donothing": 69.08293906599283,
+        "step.switching": 70.03765366971493,
+        "nminus1.reset": 495.32799795269966,
+        "nminus1.donothing": 974.7488144785166,
+        "nminus1.powerflow": 473.19302428513765
+      },
+      "develop_muzero": {
+        "step.reset": 11.184388771653175,
+        "step.donothing": 19.929779693484306,
+        "step.switching": 21.254191175103188,
+        "nminus1.reset": 229.8629116266966,
+        "nminus1.donothing": 454.5015450567007,
+        "nminus1.powerflow": 226.80684365332127
+      }
+    },
+    "grid_30": {
+      "switching_action": 5,
+      "info_develop": {
+        "size": 30,
+        "n_bus": 30,
+        "n_line": 41,
+        "n_trafo": 0,
+        "n_load": 20,
+        "n_gen": 5,
+        "n_substation": 10,
+        "n_switch": 116,
+        "n_bus_expanded": 93,
+        "n_actions_used": 347
+      },
+      "info_develop_muzero": {
+        "size": 30,
+        "n_bus": 30,
+        "n_line": 41,
+        "n_trafo": 0,
+        "n_load": 20,
+        "n_gen": 5,
+        "n_substation": 10,
+        "n_switch": 116,
+        "n_bus_expanded": 93,
+        "n_actions_used": 347
+      },
+      "develop": {
+        "step.reset": 48.173596151173115,
+        "step.donothing": 75.23078098893166,
+        "step.switching": 75.19966084510088,
+        "nminus1.reset": 942.771028727293,
+        "nminus1.donothing": 1861.1784195527434,
+        "nminus1.powerflow": 907.9932011663914
+      },
+      "develop_muzero": {
+        "step.reset": 10.129616595804691,
+        "step.donothing": 18.35225149989128,
+        "step.switching": 19.200029782950878,
+        "nminus1.reset": 391.05921797454357,
+        "nminus1.donothing": 771.6289293020964,
+        "nminus1.powerflow": 385.29258966445923
+      }
+    },
+    "grid_89": {
+      "switching_action": 3,
+      "info_develop": {
+        "size": 89,
+        "n_bus": 89,
+        "n_line": 160,
+        "n_trafo": 50,
+        "n_load": 29,
+        "n_gen": 17,
+        "n_substation": 38,
+        "n_switch": 736,
+        "n_bus_expanded": 476,
+        "n_actions_used": 500
+      },
+      "info_develop_muzero": {
+        "size": 89,
+        "n_bus": 89,
+        "n_line": 160,
+        "n_trafo": 50,
+        "n_load": 29,
+        "n_gen": 17,
+        "n_substation": 38,
+        "n_switch": 736,
+        "n_bus_expanded": 476,
+        "n_actions_used": 500
+      },
+      "develop": {
+        "step.reset": 67.39556789398193,
+        "step.donothing": 99.51004199683666,
+        "step.switching": 100.00214446336031,
+        "nminus1.reset": 5235.696226358414,
+        "nminus1.donothing": 10182.026293128729,
+        "nminus1.powerflow": 5062.597053125501
+      },
+      "develop_muzero": {
+        "step.reset": 12.662297114729881,
+        "step.donothing": 22.898406721651554,
+        "step.switching": 24.35324713587761,
+        "nminus1.reset": 2353.002939373255,
+        "nminus1.donothing": 4766.713032498956,
+        "nminus1.powerflow": 2346.090054139495
+      }
+    }
+  },
+  "rounds": 3,
+  "repeat": 5
+}

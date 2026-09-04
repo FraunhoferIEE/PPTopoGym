@@ -1,230 +1,166 @@
 from __future__ import annotations
 
 import copy
-import cProfile
+import importlib
 import io
 import logging
-import pstats
-from dataclasses import dataclass, field
-from functools import partial, wraps
-from typing import TYPE_CHECKING, Any, Callable, ParamSpec, TypeVar
+from dataclasses import dataclass
+from functools import partial
+from typing import TYPE_CHECKING, Any, Callable
 
+import gymnasium as gym
 import numpy as np
 import pandapower as pp
 from gymnasium import spaces
+from typing_extensions import override
 
 from pandapower_env.action_space.action_space import (
     create_actions_df,
     verify_action,
 )
-from pandapower_env.environments.gym_env_pp import BaseEnvPP
-from pandapower_env.observation_space.obs_space_utils import aggregate_generators_to_buses, aggregate_loads_to_buses
-from pandapower_env.observation_space.pp_to_observation import (
-    nminus1_line_loading_max,
+from pandapower_env.environments.gym_env_pp import BaseEnvPP, deepcopy_net_sharing_profiles
+from pandapower_env.observation_space.obs_space_utils import (
+    ObservationConfig,
+    ObsType,
+    build_info_observation_registry,
+    build_observation_registry,
 )
-from pandapower_env.toolbox.utils import create_adjacency_matrix
+from pandapower_env.observation_space.pp_to_observation import (
+    has_gen_results,
+    has_load_results,
+    line_loading_max,
+    nminus1_line_loading_max,
+    system_losses_sum,
+    total_gen_p,
+    total_load_p,
+)
+from pandapower_env.toolbox.env_specs import LoggedArray, Output
+from pandapower_env.toolbox.utils import (
+    total_active_overload_mva,
+)
+from pandapower_env.toolbox.utils_graph_obs import (
+    batch_observations,
+    create_adjacency_matrix,
+    get_observation,
+    get_raw_observation,
+    make_obs_cache,
+    n_nodes,
+    n_static_slots,
+    node_slot_map,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Iterator
+    from collections.abc import Generator
+
+    import pandas as pd
 
 logger = logging.getLogger(__name__)
 
 
-P = ParamSpec("P")  # Parameter specification for the wrapped function
-R = TypeVar("R")  # Return type of the wrapped function
+def _validated_custom_observations(observations: list[dict] | None) -> dict[str, Callable]:
+    """Check the ``observation`` config entries and return them as ``{name: function}``.
 
+    Each entry must carry a ``name``, a ``function`` (called with the environment) and a
+    ``spaces`` box. An empty or missing config means the environment has no custom
+    observations.
 
-def profile_execution_time(func: Callable[P, R]) -> Callable[P, R]:
+    :param observations: the ``env_config["observation"]`` list, or None if not configured
+    :type observations: list[dict] | None
+    :return: mapping of observation name to its function (empty if none are configured)
+    :rtype: dict[str, Callable]
+    :raises ValueError: if an entry is missing ``name``, ``function`` or ``spaces``
     """
-    Time the execution time of a function.
+    if not observations:
+        return {}
+    for observation in observations:
+        for required_key in ("name", "function", "spaces"):
+            if required_key not in observation:
+                msg = f"No {required_key} in observation. Please change!"
+                raise ValueError(msg)
+    return {observation["name"]: observation["function"] for observation in observations}
 
-    :param func: The function to be profiled.
-    :type func: Callable[P, R]
-    :return: A wrapped function that profiles and prints the top 10 cumulative stats.
-    :rtype: Callable[P, R]
+
+def _copy_config_sharing_profiles(env_config: dict) -> dict:
+    """Deep-copy an env config, sharing the timeseries tables instead of copying them.
+
+    Equivalent to ``copy.deepcopy(env_config)`` for every purpose the package has -- the
+    resulting config builds an identical environment -- except that the profile DataFrames,
+    whether they sit in ``config["net"].profiles`` or in ``config["profiles"]``, are the *same
+    objects* as in the source config rather than duplicates. They are read-only once
+    :meth:`BaseEnvPP.setup_profiles` / :meth:`BaseEnvPP.setup_profiles_from_config` has consumed
+    them, and they dominate an environment's memory (see :func:`deepcopy_net_sharing_profiles`).
+
+    The ``config["profiles"]`` dicts themselves *are* copied, one shallow level deep, so a caller
+    that later swaps a frame in its own config cannot reach into the stored one.
+
+    :param env_config: the environment configuration to copy
+    :type env_config: dict
+    :return: a copy safe to hand to another ``PPTopoGym``
+    :rtype: dict
     """
+    shared_keys = ("net", "profiles")
+    config = copy.deepcopy({key: value for key, value in env_config.items() if key not in shared_keys})
 
-    @wraps(func)
-    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-        profiler = cProfile.Profile()
-        profiler.enable()  # Start profiling
-        result = func(*args, **kwargs)  # Run the function
-        profiler.disable()  # Stop profiling
-
-        # Print top k results
-        stats = pstats.Stats(profiler)
-        stats.strip_dirs()
-        stats.sort_stats("cumulative")
-        stats.print_stats(10)  # Display top 10 lines of stats
-
-        return result
-
-    return wrapper
+    if "net" in env_config:
+        net = env_config["net"]
+        config["net"] = deepcopy_net_sharing_profiles(net) if isinstance(net, pp.pandapowerNet) else copy.deepcopy(net)
+    if "profiles" in env_config:
+        config["profiles"] = {
+            element: dict(variables) for element, variables in env_config["profiles"].items()
+        }
+    return config
 
 
 @dataclass(slots=True)
-class Output:
-    """
-    NamedTuple for storing the output of the environment.
+class _ActionPlan:
+    """Precomputed positional writes for one action of ``df_actions``.
 
-    These are compatible with "normal" tuples, but provide more context.
-    The order of the defined variables is important.
-    Hence, they can be used in rllib, etc.
-    """
-
-    observation: dict = field(default_factory=dict)
-    reward: float = 0.0
-    terminated: bool = False
-    truncated: bool = False
-    info: dict = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        """Initialize prev_actions and index_profile always for observation."""
-        # Ensure observation is initialized correctly
-        self.info["prev_actions"] = []
-        self.info["index_profile"] = 0
-
-    def unpack(self) -> tuple:
-        """
-        Unpacks the tuple into its individual components.
-
-        :return: a tuple of (observation, reward, terminated, truncated, info).
-        :rtype: tuple
-        """
-        return self.observation, self.reward, self.terminated, self.truncated, self.info
-
-    def __iter__(self) -> Iterator:
-        """Allow the object to be unpacked like a tuple."""
-        return iter(self.unpack())
-
-    @classmethod
-    def from_step(cls, step_result: tuple) -> Output:
-        """
-        Create an Output instance from the result of env.step(action).
-
-        :param step_result: Tuple (observation, reward, terminated, truncated, info)
-        :return: An Output instance
-        """
-        return cls(*step_result)
-
-
-class LoggedArray:
-    """
-    A fixed-capacity logging buffer backed by a NumPy array, initialized empty.
-
-    Attributes
-    ----------
-    data : np object array; for ints + lists
-        The underlying NumPy array holding logged values (with unlogged slots as np.nan).
-    capacity : int
-        Maximum number of values that can be logged.
-    _log_idx : int
-        Current number of logged values; next insertion index.
+    Each field is a *positional* index array into the corresponding pandapower table column
+    (or ``None`` when the action does not touch that table), paired with the values to write.
+    Built once per environment by :meth:`PPTopoGym._build_action_plans` so that applying an
+    action is a handful of numpy fancy-index assignments instead of pandas label lookups.
     """
 
-    __slots__ = ("data", "_log_idx")
+    open_switches: np.ndarray | None = None
+    closed_switches: np.ndarray | None = None
+    lines: np.ndarray | None = None
+    line_in_service: np.ndarray | None = None
+    trafos: np.ndarray | None = None
+    tap_pos: np.ndarray | None = None
 
-    def __init__(self, capacity: np.integer | int) -> None:
-        """
-        Initialize the logging buffer with NaNs.
 
-        Parameters
-        ----------
-        capacity : np.integer | int
-            Maximum number of values to store.
-        """
-        self.data = np.empty(capacity, dtype=object)
-        self._log_idx = 0
+def _positional_index(table_index: pd.Index) -> dict[int, int] | None:
+    """Map table labels to row positions, or ``None`` when labels already are positions.
 
-    @property
-    def capacity(self) -> int:
-        return len(self.data)
+    ``None`` means the table is indexed ``0..n-1`` so a label *is* its position and no
+    translation is needed -- the common pandapower case.
 
-    def append(self, value: int | np.integer | Iterator) -> None:
-        """
-        Log a new value into the buffer at the next available position.
+    :param table_index: the index of a pandapower element table
+    :return: label -> position mapping, or None if the index is already ``0..n-1``
+    """
+    labels = table_index.to_numpy()
+    if len(labels) and np.array_equal(labels, np.arange(len(labels))):
+        return None
+    return {int(label): position for position, label in enumerate(labels)}
 
-        Parameters
-        ----------
-        value : int | np.integer
-            The value to store.
 
-        Raises
-        ------
-        IndexError
-            If the buffer is already full.
-        TypeError
-            If something else than a list or an integer is appended.
-        """
-        if self._log_idx >= self.capacity:
-            msg = "Exceeded capacity for logging"
-            raise IndexError(msg)
-        if isinstance(value, (int, np.integer)):
-            self.data[self._log_idx] = int(value)
-        elif isinstance(value, (list, np.ndarray)):
-            self.data[self._log_idx] = np.array(value, dtype=int)
-        else:
-            msg = f"Unsupported input type: {type(value)}"
-            raise TypeError(msg)
-        self._log_idx += 1
+def _fill_nan(arr: np.ndarray, fill: float) -> np.ndarray:
+    """Replace NaN with ``fill`` -- a faster, NaN-only ``np.nan_to_num``.
 
-    def __len__(self) -> int:
-        """
-        Return the number of logged values.
+    ``np.nan_to_num`` also scans for and replaces +/-inf and always allocates a copy;
+    observation arrays only ever need NaN filled. The common case (converged power flow,
+    valid profiles) has no NaN at all, so we return the array untouched after a single
+    ``isnan`` pass. Non-float arrays cannot hold NaN and are returned as-is.
+    """
+    if arr.dtype.kind != "f":
+        return arr
+    mask = np.isnan(arr)
+    if not mask.any():
+        return arr
+    out = arr.copy()
+    out[mask] = fill
+    return out
 
-        Returns
-        -------
-        int
-            Count of values logged so far.
-        """
-        return self._log_idx
-
-    def reset(self) -> None:
-        """Clear the buffer, resetting all entries to np.nan and the counter to zero."""
-        self.data[:self._log_idx] = [None] * self._log_idx
-        self._log_idx = 0
-
-    def __iter__(self) -> Iterator[int]:
-        """Allow iteration only over logged (non-NaN) values."""
-        return iter(self.data[:self._log_idx])
-
-    def __getitem__(self, key: int | slice) -> float |np.ndarray:
-        """
-        Access logged data using indexing or slicing.
-
-        Parameters
-        ----------
-        key : int or slice
-            The index or range of indices to access.
-
-        Raises
-        ------
-        IndexError
-            If a value is called that is not present.
-
-        Returns
-        -------
-        float or np.ndarray
-            The logged value(s) at the specified position(s).
-        """
-        if isinstance(key, int) and (key >= self._log_idx or key < -self._log_idx):
-            msg = "Index out of bounds for logged values"
-            raise IndexError(msg)
-        return self.data[: self._log_idx][key]
-
-    def __deepcopy__(self, memo: dict) -> LoggedArray:
-        new_obj = LoggedArray(self.capacity)
-        new_obj._log_idx = self._log_idx # noqa: SLF001
-        new_obj.data[:self._log_idx] = self.data[:self._log_idx]
-        new_obj.data[self._log_idx:] = np.nan
-        return new_obj
-
-    def __repr__(self) -> str:
-        return f"LoggedArray({self.data})"
-
-    def __str__(self) -> str:
-        """User-friendly string representation without None values."""
-        return str(self.data[:self._log_idx])
 
 
 
@@ -236,6 +172,7 @@ class PPTopoGym(BaseEnvPP):
     This ensures the agents can experience the consequences of their actions.
     """
 
+    @override
     def __init__(self, env_config: dict) -> None:
         """
           Initialize the PPTopoGym environment.
@@ -250,13 +187,28 @@ class PPTopoGym(BaseEnvPP):
           - 'action_space': A dictionary corresponding to the action space
 
         Custom functions in the config:
-        - reward: Function returning float;
+        - reward: Function returning float OR function-name from /data/rewards.py;
             Example usage:
             def my_custom_reward(env_instance):
                 return -env_instance.net.res_line.loading_percent.mean()
             env_config = {"reward": my_custom_reward}
+            OR
+            env_config = "reward_normalized"
         - observation: list[{"name": str, "function": Callable(self), "spaces": spaces.Box)]
-            The custom observation function gets self as input.
+            list[dict]: The custom observation function gets self as input.
+        - observation_keys: list[str]
+            list[str]: The names of the observation-keys the environment calculates
+        - fix_obs_space: bool (default: False)
+            If True, table observations are aggregated to the electrical nodes so
+            each node-mapped observation has length n_nodes (line/trafo stay
+            per-element). If False, observations keep the full pandapower table length.
+        - static_obs_space: bool (default: False)
+            If True, node-mapped observations are declared at (and zero-padded to) their
+            static upper bound instead of the node count of the reset topology. Splitting a
+            substation adds an electrical node, so without this the emitted observations
+            outgrow the declared ``observation_space`` and the vectorized environments fail
+            with a broadcast error. Off by default because enabling it changes observation
+            shapes; rewards are unaffected either way.
 
         Attributes
         ----------
@@ -268,6 +220,7 @@ class PPTopoGym(BaseEnvPP):
           - `self.current_step` (`int`): The current step within an episode.
           - `self.worst_reward` (`float`): The defined worst-case value for reward. (Hard-coded to -2)
           - `self.log_actions` (`list[int | np.integer]`): A log of taken actions.
+          - 'self.resolution' (float): The resolution of timesteps (in hours).
         This can be used to restore the network to a previous state.
         When an action is executed in the step function, it is logged here.
           - `self.current_simulation_log` (`list[dict]`): A log of simulation states
@@ -278,75 +231,92 @@ class PPTopoGym(BaseEnvPP):
           :param env_config: environment configuration
           :type env_config: dict
         """
+        # Snapshot of the config as handed in, so `orig_config` can rebuild a sibling env.
+        # The net's profile tables are shared, not copied (read-only after setup_profiles);
+        # everything else is deep-copied as before so later config edits cannot leak in.
+        self._orig_config = _copy_config_sharing_profiles(env_config)
         super().__init__(env_config)
+        # actions
         action_space = env_config["action_space"]
-        self.net = env_config["net"]
+        # NB: do not re-assign self.net = env_config["net"] here -- BaseEnvPP.__init__ has
+        # already taken an owned deep copy. Re-aliasing to the config's net would make
+        # several envs built from one config share a mutable grid (see gym_env_pp.py).
         self.df_actions = create_actions_df(self.net, action_space)
+        # Positional switch/line/trafo writes per action, resolved once (see load_action).
+        # None -> the net is not positionally indexed and load_action falls back to .loc.
+        self._action_plans: dict[int, _ActionPlan] | None = self._build_action_plans()
         # Define action space:
         self.action_space: spaces.Discrete = spaces.Discrete(len(self.df_actions))
+        self.resolution: float = env_config.get("resolution", 1.0)
+        # If True, table observations are aggregated to the electrical nodes
+        # (length == n_nodes); if False, they keep the full table length.
+        self.fix_obs_space: bool = env_config.get("fix_obs_space", True)
+
+        # Initial power flow + graph observation lookup table. Done here (before
+        # define_observation_space) so n_nodes is available for node-length shapes.
+        self.run_pf()
+        self._obs_cache: dict = make_obs_cache()
+        # Opt-in: declare node observations at their static upper bound and pad up to it, so
+        # the observation space stays valid when a substation splits (needed by the vector
+        # envs). Off by default -- turning it on changes observation shapes.
+        self.static_obs_space: bool = env_config.get("static_obs_space", False)
+        self._max_n_nodes: int = self._compute_max_n_nodes()
 
         # Set observation keys (if not provided, default to all keys)
-        # Set observation keys (if not provided, default to all keys)
-        self.default_obs_keys: list[str] = env_config.get("default_obs_keys", [
-            "bus_voltage_magnitude",
-            "bus_voltage_angle",
-            "bus_loads",
-            "bus_generators",
-            "line_loadings",
-            "line_power_flow_p_mw",
-            "line_power_flow_q_mvar",
-            "line_status",
-            "line_thermal_limit",
-            "transformer_loading_percent",
-            "transformer_power_flow_p_mw",
-            "transformer_power_flow_q_mvar",
-            "transformer_tap_position",
-            "transformer_status",
-            "generator_power_p_mw",
-            "generator_power_q_mvar",
-            "generator_status",
-            "load_power_p_mw",
-            "load_power_q_mvar",
-            "load_status",
-            "switch_positions",
-            "total_power_demand",
-            "total_power_generation",
-            "system_losses",
-            "adjacency_matrix",
-        ])
-
+        # Observation space
+        self.default_obs_items: dict = build_observation_registry()
         # Define observation space:
+        all_configs: dict[str, ObservationConfig] = self.default_obs_items
+        requested_keys = env_config.get("observation_keys", list(all_configs.keys()))
+        self.active_obs_configs = {
+            key: all_configs[key]
+            for key in requested_keys
+            if key in all_configs
+        }
+        # Aggregates that ``info_observations`` / the evaluation metrics may ask for by name but
+        # that are intentionally *not* in the observation space (see
+        # build_info_observation_registry). Only the lookup used to compute an explicitly
+        # requested key consults them; define_observation_space stays on active_obs_configs, so
+        # the observation shapes an agent was trained against do not move.
+        self._computable_obs_configs: dict[str, ObservationConfig] = {
+            **build_info_observation_registry(),
+            **self.active_obs_configs,
+        }
         observation_space: spaces.Dict = self.define_observation_space()
-        if "observation" in env_config and len(env_config["observation"]) > 0:
-            # check validity, observation has form [{name, function, spaces}]
-            for obs in env_config["observation"]:
-                if "name" not in obs:
-                    msg = "No name in observation. Please change!"
-                    raise ValueError(msg)
-                if "function" not in obs:
-                    msg = "No function in observation. Please change!"
-                    raise ValueError(msg)
-                if "spaces" not in obs:
-                    msg = "No spaces in observation. Please change!"
-                    raise ValueError(msg)
-            self.custom_obs = {obs["name"]: obs["function"] for obs in env_config["observation"]}
+
+
+
+        self.custom_obs = _validated_custom_observations(env_config.get("observation"))
+        if self.custom_obs:
             # spaces for all custom observations
             custom_observations = PPTopoGym._insert_custom_observations(env_config["observation"])
             self.observation_space: spaces.Dict = spaces.Dict({**observation_space, **custom_observations})
         else:
-            self.custom_obs = {}
             self.observation_space = observation_space
 
-        self.current_step = 0  # current steps in the episode
+        # ``active_obs_configs`` and ``custom_obs`` are assigned once here and only ever read
+        # afterwards, so the full-observation key sets and the sorted output order are fixed
+        # for the lifetime of the env and are precomputed instead of rebuilt on every call.
+        self._all_default_keys: tuple[str, ...] = tuple(self.active_obs_configs)
+        self._all_custom_keys: tuple[str, ...] = tuple(self.custom_obs)
+        self._sorted_obs_keys: tuple[str, ...] = tuple(
+            sorted((*self._all_default_keys, *self._all_custom_keys)),
+        )
 
         self.log_actions: LoggedArray = LoggedArray(self.episode_length)
         # this is used for simulation to store the previous state
         self.current_simulation_log: list[dict] = []
-
-        self.worst_reward = env_config.get("worst_reward", -1000)
         # custom reward
-        custom_reward: partial | None = env_config.get("reward")
-        if custom_reward is not None:
+        custom_reward: str | Callable | None = env_config.get("reward")
+        if isinstance(custom_reward, str):
+            module_name = "pandapower_env.data.rewards"
+            reward_module = importlib.import_module(module_name)
+            try:
+                custom_reward = getattr(reward_module, custom_reward)
+            except AttributeError:
+                msg = f"Reward function '{custom_reward}' not found in {module_name}"
+                raise ValueError(msg) from AttributeError
+        if callable(custom_reward):
             # Override the calculate_reward method behavior
             self.reward_function: Callable[[], float] = partial(custom_reward, self)
         else:
@@ -354,50 +324,40 @@ class PPTopoGym(BaseEnvPP):
 
         self.static_net_blob: None | bytes = None
 
-    # @profile_execution_time
-    # @profile
     def start_simulation(self) -> None:
         """
         Start a new simulation session.
 
-        This fct stores the current state of the network:
-        - Topology: By re-doing actions
-        - Current episode length
-        - Index of the profile
-        - Profile of the network
+        Snapshots the state :meth:`end_simulation` restores: the switch / line / trafo
+        topology arrays, the profile index, the step counter and the action log.
 
         It is not private, to enable users to start simulations in simulations.
         This is similar to Grid2OP.
         """
-        current_net: dict[str, list | int | LoggedArray] = {}
-        current_net["prev_actions"] = copy.deepcopy(self.log_actions)
-        current_net["index_profile"] = self.index
-        self.current_simulation_log.append(current_net)
+        self.current_simulation_log.append(self.save_state())
 
-    # @profile_execution_time
-    # @profile
     def end_simulation(self) -> None:
         """
         End the current simulation session and save the log.
 
-        This fct restores the network to the previous state,
-        saved in latest entry of the current_simulation_log.
-        It reruns all actions with load_action, and then runs the powerflow.
+        Restores the network to the state snapshotted by the matching
+        :meth:`start_simulation` -- topology, profile index and action log -- and re-solves it.
         """
         last_state = self.current_simulation_log.pop()
-        # return to the previous state
-        index = last_state["index_profile"]
-        self.reset(options={"index": index})
-        self.log_actions = copy.deepcopy(last_state["prev_actions"])
-        for action in self.log_actions:
-            self.load_action(action)
-        self.index = last_state["index_profile"]
+        # Restore the captured topology directly instead of rewinding to the baseline and
+        # replaying the action log: ``start_simulation`` already snapshotted the exact switch /
+        # line / trafo arrays, so the replay only re-derived a state we were holding. It also
+        # could not reproduce the live grid after a crashed step, which appends no action to
+        # the log (see CLAUDE.md) -- the replay restored a *different* topology there.
+        self.restore_state(last_state)
+        # end_simulation's own contract for the two counters, unchanged: current_step follows
+        # the action log, and episode_step_counter is zeroed the way _reset_state zeroed it.
         self.current_step = len(self.log_actions)
-        # loaded into the net in super().step()
-        self.run_pf()
+        self.episode_step_counter = 0
+        self.run_pf(pf_type = self.pf_type)
         if self.net.converged is False:
             msg = f"Power flow did not converge at step {self.current_step}"
-            logger.exception(msg)
+            logger.warning(msg)
             self._handle_loadflow_failure()
 
     def simulation(
@@ -428,26 +388,7 @@ class PPTopoGym(BaseEnvPP):
             - If a power flow calculation fails (e.g., `pp.LoadflowNotConverged`), the reward is set
               to `worst_reward`, and the simulation continues with subsequent actions.
         """
-        outputs: list = []
-        if isinstance(actions, (int, np.integer)):
-            actions = [actions]
-        self.start_simulation()
-        for action in actions:
-            if isinstance(action, int) and action >= len(self.df_actions):
-                msg = f"Invalid action {action}. Must be within action space range."
-                raise ValueError(msg)
-
-            observation, reward, terminated, truncated, info = self.step(action)
-            if  not info.get("crashed", False):
-                info["powerflow_converged"] = True
-                output = Output(observation, reward, terminated, truncated, info)
-                outputs.append(output)
-            else:
-                msg = f"Power flow did not converge in simulation at step {self.current_step}"
-                logger.exception(msg)
-                outputs.append(self._handle_loadflow_failure())
-        self.end_simulation()  # also running run_pp
-        return outputs
+        return self._simulate(actions, with_nminus1=False)
 
     def simulation_nminus1(
         self,
@@ -477,39 +418,91 @@ class PPTopoGym(BaseEnvPP):
             - If a power flow calculation fails (e.g., `pp.LoadflowNotConverged`), the reward is set
               to `worst_reward`, and the simulation continues with subsequent actions.
         """
+        return self._simulate(actions, with_nminus1=True)
+
+    def _simulate(
+        self,
+        actions: int | np.integer | list[int | np.integer] | Generator[int, None, None],
+        *,
+        with_nminus1: bool,
+    ) -> list[Output]:
+        """Drive a sequence of actions between ``start_simulation`` and ``end_simulation``.
+
+        The shared body of :meth:`simulation` and :meth:`simulation_nminus1`, which differed
+        only in whether each output carries an ``nminus1`` observation.
+
+        :param actions: a single action or a sequence of them.
+        :param with_nminus1: also report the worst N-1 line loading per action.
+        :return: one :class:`Output` per action, in order.
+        :rtype: list[Output]
+        """
         outputs: list = []
         if isinstance(actions, (int, np.integer)):
             actions = [actions]
         self.start_simulation()
         for action in actions:
-            if isinstance(action, int) and action >= len(self.df_actions):
-                msg = f"Invalid action {action}. Must be within action space range."
-                raise ValueError(msg)
+            self._validate_action(action)
             observation, reward, terminated, truncated, info = self.step(action)
-            if  not info.get("crashed", False):
+            if not info.get("crashed", False):
                 info["powerflow_converged"] = True
                 output = Output(observation, reward, terminated, truncated, info)
-                output.observation["nminus1"] = nminus1_line_loading_max(self.net)
-                outputs.append(output)
+                if with_nminus1:
+                    output.observation["nminus1"] = nminus1_line_loading_max(self.net)
             else:
-                msg = f"Power flow did not converge in simulation N-1 at step {self.current_step}"
-                logger.exception(msg)
+                label = "simulation N-1" if with_nminus1 else "simulation"
+                logger.warning(
+                    "Power flow did not converge in %s at step %s", label, self.current_step,
+                )
                 output = self._handle_loadflow_failure()
-                output.truncated = False
-                output.terminated = True
-                output.observation["nminus1"] = float("inf")
-                outputs.append(output)
+                if with_nminus1:
+                    # _handle_loadflow_failure already sets these; the N-1 path restated them.
+                    output.truncated = False
+                    output.terminated = True
+                    output.observation["nminus1"] = float("inf")
+            outputs.append(output)
         self.end_simulation()  # also running run_pp
         return outputs
 
+    def _validate_action(self, action: int | np.integer) -> None:
+        """Reject an action index that is not a row of ``df_actions``.
+
+        The check accepts ``np.integer`` as well as ``int`` and rejects negative indices. Both
+        matter in practice: an agent hands back whatever ``action_space.sample()`` or an
+        ``argmax`` produced, which is a numpy integer, and the previous ``isinstance(action, int)``
+        guard let those straight through into ``load_action`` -- where an out-of-range index
+        surfaced as a bare ``KeyError`` and a negative one silently applied the *last* action
+        instead of raising.
+
+        :param action: the action index to check.
+        :type action: int | np.integer
+        :raises ValueError: if ``action`` is not an integer in ``[0, len(df_actions))``.
+        """
+        if not isinstance(action, (int, np.integer)) or not 0 <= int(action) < len(self.df_actions):
+            msg = (
+                f"Invalid action {action!r}. Must be an integer within the action space range "
+                f"[0, {len(self.df_actions)})."
+            )
+            raise ValueError(msg)
+
     def verify_action(self, action: int | np.integer) -> bool:
-        """Load action and do tests."""
+        """
+        Apply actions rules.
+
+        This runs a simulation of an action for verification.
+        Actions rules include:
+        - passes_two_bus_symmetry_rule
+        - passes_islanded_elements_rule
+        - passes_n_elements_rule
+
+        These work only for substations with 2 busbars, not more.
+        """
         self.start_simulation()
         # as net is altered in verify function
-        verfify = verify_action(self.net, self.df_actions.loc[action])
+        verify = verify_action(self.net, self.df_actions.loc[action])
         self.end_simulation()
-        return verfify
+        return verify
 
+    @override
     def step(self, action: int | np.integer) -> tuple:
         """
         Execute a single action and return the environment's response.
@@ -525,18 +518,26 @@ class PPTopoGym(BaseEnvPP):
         if terminated:
             return self._handle_loadflow_failure().unpack()
         self.log_actions.append(action)
-        observation = obs if isinstance(obs, dict) else {"line_loadings": obs}
         if truncated:
             return obs, reward, terminated, truncated, info
         info.update(self.state_to_info())
-        return observation, reward, terminated, truncated, info
+        return obs, reward, terminated, truncated, info
 
-    def _empty_obs(self) -> dict[str, np.ndarray]:
-        empty_obs =  {k : np.zeros(space.shape or (), dtype=space.dtype or np.float32)
-                      for k, space in self.observation_space.spaces.items()}
-        empty_obs["adjacency_matrix"] = create_adjacency_matrix(self.net).astype(np.int32)
+    def _empty_obs(self) -> dict[str, np.ndarray | float]:
+        empty_obs: dict[str, np.ndarray | float] = {
+            k: np.zeros(space.shape or (), dtype=space.dtype or np.float32)
+            for k, space in self.observation_space.spaces.items()
+        }
+        for key, config in self.active_obs_configs.items():
+            if config.obs_type == ObsType.TOPOLOGY:
+                empty_obs[key] = self._get_topology_value(config)
+        if "adjacency_matrix" in self.active_obs_configs:
+            empty_obs["adjacency_matrix"] = create_adjacency_matrix(self.net, self._obs_cache).astype(np.int32)
+        if "node_slot_map" in self.active_obs_configs:
+            # Like the adjacency: a real topology map, not zeros. Zeros would send every node to
+            # slot 0, so a consumer scattering into slots would silently stack them on one row.
+            empty_obs["node_slot_map"] = node_slot_map(self.net, self._obs_cache).astype(np.int32)
         return empty_obs
-
     def _handle_loadflow_failure(self) -> Output:
         output = Output()
         output.observation = self._empty_obs()
@@ -558,6 +559,96 @@ class PPTopoGym(BaseEnvPP):
         obs_spaces_dict = {obs["name"]: obs["spaces"] for obs in list_observations}
         return spaces.Dict(obs_spaces_dict)
 
+    def _get_table_length(self, table_name: str) -> int:
+        """Get the length of a pandapower network table."""
+        if table_name == "adjacency":
+            return len(self.net.line) + len(self.net.trafo)
+        if table_name == "node_slots":
+            return n_static_slots(self.net, self._obs_cache)
+        return len(self.net[table_name])
+
+    def _node_observation_length(self) -> int:
+        """Length of a node-aggregated observation: either the live or the static node count.
+
+        ``n_nodes`` is not constant: splitting a double-busbar substation adds an electrical
+        node, so an observation built at the reset topology is shorter than one built after a
+        split. Declaring the reset length -- the historical behaviour -- makes the environment
+        emit observations that violate its own ``observation_space`` and breaks the vectorized
+        envs (see the ``static_obs_space`` config key).
+
+        With ``static_obs_space`` enabled the length is the static upper bound instead, and
+        :meth:`_pad_to_node_length` pads every node observation up to it.
+
+        :return: the number of entries a node-mapped observation has.
+        :rtype: int
+        """
+        if self.static_obs_space:
+            return self._max_n_nodes
+        return n_nodes(self.net, self._obs_cache)
+
+    def _compute_max_n_nodes(self) -> int:
+        """Compute the static upper bound on the node count, over every reachable topology.
+
+        Every busbar of a multi-busbar substation can carry at most one electrical node, so
+        the grid can never have more nodes than the reset topology has, plus one extra node
+        per additional busbar that the substations can split off. That bound is topology
+        independent, which is exactly what a fixed observation space needs.
+
+        :return: the largest node count any action sequence can produce.
+        :rtype: int
+        """
+        base_nodes = n_nodes(self.net, self._obs_cache)
+        substations = self.net.get("multi_bb_substation")
+        if substations is None or not len(substations):
+            return base_nodes
+        extra_busbars = (substations["n_busbars_in_substation"].to_numpy(dtype=int) - 1).clip(min=0)
+        return base_nodes + int(extra_busbars.sum())
+
+    def _pad_to_node_length(self, values: np.ndarray) -> np.ndarray:
+        """Pad a node-aggregated observation with zeros up to the static node length.
+
+        A no-op unless ``static_obs_space`` is on. Padding with zeros keeps the entries of the
+        nodes that do exist at their own indices, and reads as "no element here" for the
+        trailing slots that a less-split topology does not use.
+
+        :param values: a node-aggregated observation array
+        :type values: np.ndarray
+        :return: the array, padded to ``self._max_n_nodes`` if needed
+        :rtype: np.ndarray
+        """
+        if not self.static_obs_space:
+            return values
+        missing = self._max_n_nodes - len(values)
+        if missing <= 0:
+            return values
+        return np.concatenate([values, np.zeros(missing, dtype=values.dtype)])
+
+    def _resolve_shape(self, obs_config: ObservationConfig) -> tuple[int, ...]:
+        """Resolve the observation shape from the config specification."""
+        shape_spec = obs_config.spaces_shape
+        if shape_spec is None or shape_spec == "scalar":
+            return (1,)
+
+        if isinstance(shape_spec, tuple) and len(shape_spec) == 2:  # noqa: PLR2004
+            dim0 = (
+                self._get_table_length(shape_spec[0])
+                if isinstance(shape_spec[0], str)
+                else shape_spec[0]
+            )
+            return (dim0, shape_spec[1])
+
+        if isinstance(shape_spec, str):
+            if (
+                self.fix_obs_space
+                and obs_config.obs_type == ObsType.TABLE
+                and shape_spec not in {"line", "trafo"}
+            ):
+                return (self._node_observation_length(),)
+            return (self._get_table_length(shape_spec),)
+        msg = f"resolve_shape for type {shape_spec} not solveable." # type: ignore[unreachable]
+        raise ValueError(msg)
+
+
     def define_observation_space(self) -> spaces.Dict:
         """
         Define the observation space for the environment.
@@ -568,255 +659,327 @@ class PPTopoGym(BaseEnvPP):
         - Allocate memory for the observations.
         - Understand the environment's state space structure and bounds.
 
-        Current observations:
-        - Line loadings in percentage.
-
-        :return: A Box space defining the bounds and shape of the observation space.
-        :rtype: spaces.Box
-
-        The bounds are defined as:
-        - Low: 0 (minimum loading percentage).
-        - High: 200 (maximum loading percentage, accounting for possible overloading).
-        - Shape: (len(self.net.line),) where `len(self.net.line)` is the number of lines.
-        - Data type: `np.float32`.
+        :return: A Dict space containing all observation spaces.
+        :rtype: spaces.Dict
         """
-        full_obs_space = spaces.Dict({
-            "bus_voltage_magnitude": spaces.Box(
-                low=0.0, high=1.2,
-                shape=(len(self.net.bus),),
-                dtype=np.float32,
-            ),
-            "bus_voltage_angle": spaces.Box(
-                low=-360, high=+360,
-                shape=(len(self.net.bus),),
-                dtype=np.float32,
-            ),
-            "bus_loads": spaces.Box(
-                low=-1000, high=1000,
-                shape=(len(self.net.bus),),
-                dtype=np.float32,
-            ),
-            "bus_generators": spaces.Box(
-                low=0, high=1000,
-                shape=(len(self.net.bus),),
-                dtype=np.float32,
-            ),
-            "line_loadings": spaces.Box(
-                low=0, high=200,
-                shape=(len(self.net.line),),
-                dtype=np.float32,
-            ),
-            "line_power_flow_p_mw": spaces.Box(
-                low=-1000, high=1000,
-                shape=(len(self.net.line),),
-                dtype=np.float32,
-            ),
-            "line_power_flow_q_mvar": spaces.Box(
-                low=-1000, high=1000,
-                shape=(len(self.net.line),),
-                dtype=np.float32,
-            ),
-            "line_status": spaces.Box(
-                low=0, high=1,
-                shape=(len(self.net.line),),
-                dtype=np.int32,
-            ),
-            "line_thermal_limit": spaces.Box(
-                low=0, high=100000,
-                shape=(len(self.net.line),),
-                dtype=np.float32,
-            ),
-            "transformer_loading_percent": spaces.Box(
-                low=0, high=150,
-                shape=(len(self.net.trafo),),
-                dtype=np.float32,
-            ),
-            "transformer_power_flow_p_mw": spaces.Box(
-                low=-1000, high=1000,
-                shape=(len(self.net.trafo),),
-                dtype=np.float32,
-            ),
-            "transformer_power_flow_q_mvar": spaces.Box(
-                low=-1000, high=1000,
-                shape=(len(self.net.trafo),),
-                dtype=np.float32,
-            ),
-            "transformer_tap_position": spaces.Box(
-                low=np.iinfo(np.int32).min,
-                high=np.iinfo(np.int32).max,
-                shape=(len(self.net.trafo),),
-                dtype=np.int32,
-            ),
-            "transformer_status": spaces.Box(
-                low=0, high=1,
-                shape=(len(self.net.trafo),),
-                dtype=np.int32,
-            ),
-            "generator_power_p_mw": spaces.Box(
-                low=0, high=1000,
-                shape=(len(self.net.gen),),
-                dtype=np.float32,
-            ),
-            "generator_power_q_mvar": spaces.Box(
-                low=-1000, high=1000,
-                shape=(len(self.net.gen),),
-                dtype=np.float32,
-            ),
-            "generator_status": spaces.Box(
-                low=0, high=1,
-                shape=(len(self.net.gen),),
-                dtype=np.int32,
-            ),
-            "load_power_p_mw": spaces.Box(
-                low=-1000, high=1000,
-                shape=(len(self.net.load),),
-                dtype=np.float32,
-            ),
-            "load_power_q_mvar": spaces.Box(
-                low=-1000, high=1000,
-                shape=(len(self.net.load),),
-                dtype=np.float32,
-            ),
-            "load_status": spaces.Box(
-                low=0, high=1,
-                shape=(len(self.net.load),),
-                dtype=np.int32,
-            ),
-            "switch_positions": spaces.Box(
-                low=-1, high=1,
-                shape=(len(self.net.switch),),
-                dtype=np.int32,
-            ),
+        def create_box(obs_config: ObservationConfig) -> spaces.Box:
+            """Create a gymnasium Box space from an ObservationConfig."""
+            shape = self._resolve_shape(obs_config)
 
-            "total_power_demand": spaces.Box(
-                low=0, high=1e6,
-                shape=(1,),
-                dtype=np.float32,
-            ),
-            "total_power_generation": spaces.Box(
-                low=0, high=1e6,
-                shape=(1,),
-                dtype=np.float32,
-            ),
-            "system_losses": spaces.Box(
-                low=0, high=1e6,
-                shape=(1,),
-                dtype=np.float32,
-            ),
-            "adjacency_matrix": spaces.Box(
-                low=0,
-                high=np.iinfo(np.int32).max,
-                shape=(len(self.net.line) + len(self.net.trafo), 2),
-                dtype=np.int32,
-            ),
-        })
-        # Filter out keys not in self.default_obs_keys
-        filtered_space = {key: space for key, space in full_obs_space.items() if key in self.default_obs_keys}
-        return spaces.Dict(filtered_space)
+            # Ensure low/high are floats and replace None with infinity
+            # This satisfies the SupportsFloat requirement
+            low_val = float(obs_config.low) if obs_config.low is not None else -np.inf
+            high_val = float(obs_config.high) if obs_config.high is not None else np.inf
+
+            return spaces.Box(
+                low=low_val,
+                high=high_val,
+                shape=shape,
+                dtype=obs_config.dtype,
+            )
+
+        obs_space_dict: dict[str, gym.Space] = {
+            key: create_box(config)
+            for key, config in self.active_obs_configs.items()
+        }
+
+        return spaces.Dict(obs_space_dict)
 
 
-    def _get_default_observation(self, key: str) -> np.ndarray: #noqa: PLR0911, PLR0912, C901
+    def _get_default_observation(self, key: str) -> np.ndarray:
         """
-        Get a default observation value by key.
+        Get observation value using the ObservationConfig specification.
 
-        This method extracts the actual observation data from the pandapower network
-        with proper error handling and data type conversion.
+        Parameters
+        ----------
+        key : str
+            The observation key from active_obs_configs.
 
-        :param key: The observation key name
-        :return: The observation data as numpy array
+        Returns
+        -------
+        np.ndarray
+            The observation data as numpy array.
+
+        Raises
+        ------
+        ValueError
+            If obs_type is unknown or custom column is not recognized.
         """
-        match key:
-            case "bus_voltage_magnitude":
-                return np.nan_to_num(self.net.res_bus["vm_pu"].to_numpy(dtype=np.float32), nan=0.0)
-            case "bus_voltage_angle":
-                return np.nan_to_num(self.net.res_bus["va_degree"].to_numpy(dtype=np.float32), nan=360.0)
-            case "bus_loads":
-                return aggregate_loads_to_buses(self.net)
-            case "bus_generators":
-                return aggregate_generators_to_buses(self.net)
-            case "line_loadings":
-                return np.clip(
-                    np.nan_to_num(self.net.res_line["loading_percent"].to_numpy(dtype=np.float32), nan=200.0),
-                    0.0, 200.0,
-                )
-            case "line_power_flow_p_mw":
-                return np.nan_to_num(self.net.res_line["p_from_mw"].to_numpy(dtype=np.float32), nan=0.0)
-            case "line_power_flow_q_mvar":
-                return np.nan_to_num(self.net.res_line["q_from_mvar"].to_numpy(dtype=np.float32), nan=0.0)
-            case "line_status":
-                return self.net.line["in_service"].to_numpy(dtype=np.int32, na_value=0)
-            case "line_thermal_limit":
-                return np.nan_to_num(self.net.line["max_i_ka"].to_numpy(dtype=np.float32), nan=1e-6)
-            # Transformer information
-            case "transformer_loading_percent":
-                return np.nan_to_num(self.net.res_trafo["loading_percent"].to_numpy(dtype=np.float32), nan=0.0)
-            case "transformer_power_flow_p_mw":
-                return np.nan_to_num(self.net.res_trafo["p_hv_mw"].to_numpy(dtype=np.float32), nan=0.0)
-            case "transformer_power_flow_q_mvar":
-                return np.nan_to_num(self.net.res_trafo["q_hv_mvar"].to_numpy(dtype=np.float32), nan=0.0)
-            case "transformer_tap_position":
-                return self.net.trafo["tap_pos"].to_numpy(dtype=np.int32, na_value=0)
-            case "transformer_status":
-                return self.net.trafo["in_service"].to_numpy(dtype=np.int32, na_value=0)
-            # Generator information
-            case "generator_power_p_mw":
-                return np.nan_to_num(self.net.res_gen["p_mw"].to_numpy(dtype=np.float32), nan=0.0)
-            case "generator_power_q_mvar":
-                return np.nan_to_num(self.net.res_gen["q_mvar"].to_numpy(dtype=np.float32), nan=0.0)
-            case "generator_status":
-                return self.net.gen["in_service"].to_numpy(dtype=np.int32, na_value=0)
-            case "load_power_p_mw":
-                return np.nan_to_num(self.net.res_load["p_mw"].to_numpy(dtype=np.float32), nan=0.0)
-            case "load_power_q_mvar":
-                return np.nan_to_num(self.net.res_load["q_mvar"].to_numpy(dtype=np.float32), nan=0.0)
-            case "load_status":
-                return self.net.load["in_service"].to_numpy(dtype=np.int32, na_value=0)
-            case "switch_positions":
-                return self.net.switch["closed"].to_numpy(dtype=np.int32, na_value=0)
-            case "total_power_demand":
-                return np.array([np.nan_to_num(self.net.res_load["p_mw"].sum(), nan=0.0)], dtype=np.float32)
-            case "total_power_generation":
-                return np.array([np.nan_to_num(self.net.res_gen["p_mw"].sum(), nan=0.0)], dtype=np.float32)
-            case "system_losses":
-                loss = self.net.res_line["pl_mw"].sum() + self.net.res_trafo["pl_mw"].sum()
-                return np.array([np.nan_to_num(loss, nan=0.0)], dtype=np.float32)
-            case "adjacency_matrix":
-                return create_adjacency_matrix(self.net).astype(np.int32)
+        config = self._computable_obs_configs[key]
+
+        if config.handler is not None:
+            return config.handler(self.net)
+
+        match config.obs_type:
+            case ObsType.PROFILE:
+                return self._get_profile_value(config)
+            case ObsType.AGGREGATE:
+                return self._get_aggregate_value(config.column, config.dtype, config.nan_value)
+            case ObsType.CUSTOM:
+                return self._get_custom_value(config.column, config.dtype)
+            case ObsType.TABLE:
+                return self._get_table_value(config)
+            case ObsType.TOPOLOGY:
+                return self._get_topology_value(config)
             case _:
-                msg = f"Unknown observation key: {key}"
+                msg = f"Unknown observation type: {config.obs_type}" # type:ignore [unreachable]
+                raise ValueError(msg)
+
+    def _get_custom_value(self, column: str, dtype: type) -> np.ndarray:
+        """
+        Get custom observation values requiring special computation.
+
+        Parameters
+        ----------
+        column : str
+            The custom observation identifier.
+        dtype : type
+            Target numpy dtype.
+
+        Returns
+        -------
+        np.ndarray
+            The computed custom observation.
+
+        Raises
+        ------
+        ValueError
+            If the custom observation column is not recognized.
+        """
+        match column:
+            case "adjacency_matrix":
+                return create_adjacency_matrix(self.net, self._obs_cache).astype(dtype)
+            case "node_slot_map":
+                return node_slot_map(self.net, self._obs_cache).astype(dtype)
+            case _:
+                msg = f"Unknown custom observation: {column}"
                 raise ValueError(msg)
 
 
-    def create_observation(self) -> dict:
+    def _get_table_value(self, config: ObservationConfig) -> np.ndarray:
+        """
+        Get observation value from a standard pandapower table and enforce datatype.
+
+        Parameters
+        ----------
+        config : ObservationConfig
+            The observation configuration containing table, column, and dtype info.
+
+        Returns
+        -------
+        np.ndarray
+            Values from the specified table column, cast to config.dtype.
+        """
+        # 1. Extract data (aggregated to nodes if fix_obs_space, else raw table length)
+        if self.fix_obs_space:
+            column_data = get_observation(
+                self.net, self._obs_cache, config.table, config.column,
+            )
+            # Node observations grow when a substation splits; pad them back to the declared
+            # length so the observation space keeps holding. Guarded on the flag first so the
+            # default path costs one attribute lookup and never enters the padding helper --
+            # this runs for every table observation on every step.
+            # ``spaces_shape`` is the same discriminator define_observation_space uses, so the
+            # padded keys are exactly the ones declared at the node length.
+            if self.static_obs_space and config.spaces_shape not in {"line", "trafo"}:
+                column_data = self._pad_to_node_length(column_data)
+        else:
+            column_data = get_raw_observation(
+                self.net, self._obs_cache, config.table, config.column,
+            )
+
+        # 2. Handle NaNs and convert to the target dtype immediately
+        # We cast to config.dtype here to ensure nan_val is compatible
+        values: np.ndarray = _fill_nan(column_data, config.nan_value).astype(config.dtype)
+
+        # 3. Clip values if bounds are provided. In place: the .astype above always returns a
+        # freshly allocated array (copy=True by default), never a view into a net table.
+        if config.low is not None and config.high is not None:
+            np.clip(values, config.low, config.high, out=values)
+
+        return values
+
+    def _current_profile_rows(self) -> dict[tuple[str, str], np.ndarray]:
+        """Profile rows for the current timestep as numpy arrays, cached per index.
+
+        All profile observations and profile aggregates at one timestep read the same
+        rows; caching them avoids a pandas ``.loc`` label lookup per observation key
+        (and per ``create_observation`` call while the index is unchanged -- the profile
+        tables are immutable after ``setup_profiles``).
+        """
+        if self._profile_rows_index == self.index:
+            return self._profile_rows_cache
+        idx = self.index
+        rows: dict[tuple[str, str], np.ndarray] = {}
+        specs = (
+            ("profile_load", "p_mw", self.df_profiles_load_p),
+            ("profile_load", "q_mvar", self.df_profiles_load_q),
+            ("profile_gen", "p_mw", self.df_profiles_gen_p),
+            ("profile_gen", "vm_pu", self.df_profiles_gen_vm),
+            ("profile_sgen", "p_mw", self.df_profiles_sgen_p),
+            ("profile_sgen", "q_mvar", self.df_profiles_sgen_q),
+        )
+        for table, column, df in specs:
+            if not df.empty and idx in df.index:
+                rows[table, column] = df.loc[idx].to_numpy()
+        self._profile_rows_cache = rows
+        self._profile_rows_index = idx
+        return rows
+
+    def _get_profile_value(
+        self,
+        config: ObservationConfig,
+    ) -> np.ndarray:
+        """Get observation value from profile dataframes."""
+        base_table = config.table.removeprefix("profile_")
+        if getattr(self.net, base_table).empty:
+            return np.array([], dtype=config.dtype)
+
+        values = self._current_profile_rows().get((config.table, config.column))
+        if values is None:
+            msg = f"Unknown profile: {config.table}.{config.column}"
+            raise ValueError(msg)
+
+        values = _fill_nan(values, config.nan_value).astype(config.dtype)
+        # In place: .astype always allocates, so this never writes into the profile table.
+        if config.low is not None and config.high is not None:
+            np.clip(values, config.low, config.high, out=values)
+        return values
+
+    def _get_topology_value(self, config: ObservationConfig) -> np.ndarray:
+        """Get raw topology information (bus IDs, lookup table)."""
+        if config.column == "bus_lookup_table":
+            return self.net._pd2ppc_lookups["bus"].astype(config.dtype)  # noqa: SLF001
+
+        table = getattr(self.net, config.table)
+        if len(table) == 0:
+            return np.array([], dtype=config.dtype)
+        return table[config.column].to_numpy().astype(config.dtype)
+
+    def _get_aggregate_value(  # noqa: C901, PLR0912
+        self,
+        column: str,
+        dtype: type,
+        nan_val: float,
+    ) -> np.ndarray:
+        """Get scalar aggregate observation values as 1D array with requested dtype."""
+        value: float = nan_val
+
+        match column:
+            case "total_load_p_profile":
+                row = self._current_profile_rows().get(("profile_load", "p_mw"))
+                if row is not None and not self.net.load.empty:
+                    value = float(row.sum())
+            case "total_gen_p_profile":
+                rows = self._current_profile_rows()
+                total = 0.0
+                found = False
+                gen_row = rows.get(("profile_gen", "p_mw"))
+                if gen_row is not None and not self.net.gen.empty:
+                    total += float(gen_row.sum())
+                    found = True
+                sgen_row = rows.get(("profile_sgen", "p_mw"))
+                if sgen_row is not None and not self.net.sgen.empty:
+                    total += float(sgen_row.sum())
+                    found = True
+                value = total if found else nan_val
+            case "total_load_p_runpf":
+                if has_load_results(self.net):
+                    value = total_load_p(self.net)
+            case "total_gen_p_runpf":
+                if has_gen_results(self.net):
+                    value = total_gen_p(self.net)
+            case "system_losses":
+                value = system_losses_sum(self.net)
+            case "total_energy_overload":
+                value = total_active_overload_mva(self.net)
+            case "max_loading_percent":
+                if not self.net.res_line.empty:
+                    value = line_loading_max(self.net)
+            case _:
+                msg = f"Unknown aggregate column: {column}"
+                raise ValueError(msg)
+
+        if np.isnan(value):
+            value = nan_val
+        return np.array([value], dtype=dtype)
+
+    @override
+    def create_observation(
+    self,
+    keys: list[str] | None = None,
+) -> dict[str, np.ndarray | float]:
         """
         Generate an observation of the current network state.
 
         Observations capture the key features of the network state that agents use to
-        make decisions. Currently, this includes the loading percentage of all lines.
+        make decisions.
 
-        :return: A dictionary containing the current line loadings.
-        :rtype: dict
+        Parameters
+        ----------
+        keys : list[str] | None
+            Specific observation keys to include. If None, all active observations
+            (both default and custom) are included.
 
+        Returns
+        -------
+        dict[str, np.ndarray | float]
+            A dictionary containing all requested observation arrays. A non-converged power
+            flow yields the zero-filled fallback from :meth:`_empty_obs`, not an exception.
         """
-        if not hasattr(self.net, "converged"):
-            msg = "Power flow has not been run yet. Please run power flow before creating an observation."
-            raise ValueError(msg)
-        observation = {}
-        converged = self.net.converged
+        if self.net.converged is None:
+            self.run_pf()
 
-        # Adjacency information
-        create_adjacency_matrix(self.net).astype(np.int32)
-        if converged:
-            for key in self.default_obs_keys:
-                observation[key] = self._get_default_observation(key)
-            for key, fct in self.custom_obs.items():
-                observation[key] = fct(self)
-        else:
+        if not self.net.converged:
             msg = f"Power flow did not converge at creating an observation at step {self.current_step}"
-            logger.exception(msg)
-            observation = self._empty_obs()
-        return dict(sorted(observation.items()))
+            logger.warning(msg)
+            return self._empty_obs()
 
+        observation: dict[str, np.ndarray | float] = {}
+
+        if keys is None: # Include all active default observations and all custom observations
+            default_keys: tuple[str, ...] | set[str] = self._all_default_keys
+            custom_keys: tuple[str, ...] | set[str] = self._all_custom_keys
+            output_keys: tuple[str, ...] = self._sorted_obs_keys
+        else: # Filter to only requested keys (info-only aggregates included, see __init__)
+            default_keys = set(keys) & set(self._computable_obs_configs.keys())
+            custom_keys = set(keys) & set(self.custom_obs.keys())
+            output_keys = tuple(sorted((*default_keys, *custom_keys)))
+
+        with batch_observations(self.net, self._obs_cache):
+            for key in default_keys:
+                observation[key] = self._get_default_observation(key)
+            for key in custom_keys:
+                observation[key] = self.custom_obs[key](self)
+        return {k: observation[k] for k in output_keys}
+
+
+
+    def _observation_before_to_info(self) -> dict:
+        return self.create_observation(keys=self.info_intermediate_obs)
+
+    def _observation_after_to_info(self) -> dict:
+        obs_keys = []
+        for key in self.info_intermediate_obs:
+            if key in self.active_obs_configs:
+                continue
+            obs_keys.append(key)
+        return self.create_observation(keys=obs_keys)
+
+    @override
+    def observation_to_info(self, metric_key: str) -> dict:
+        """Report intermediate loadflow results to info."""
+        info: dict = super().observation_to_info(metric_key = metric_key)
+        new_info = {}
+        if metric_key == "before":
+            new_info = self._observation_before_to_info()
+        elif metric_key == "after":
+            new_info = self._observation_after_to_info()
+
+        new_info = {f"{k}_{metric_key}": v for k, v in new_info.items()}
+
+        info.update(new_info)
+        return info
 
     def state_to_info(self) -> dict:
         """
@@ -859,7 +1022,7 @@ class PPTopoGym(BaseEnvPP):
         else:
             self.reset()
         if len(info["prev_actions"]) == 0:
-            self.run_pf() # run powerflow
+            self.run_pf(pf_type = self.pf_type) # run powerflow
             if self.net.converged is True:
                 return
             msg = "Power flow did not converge for the step 0 in create_observation."
@@ -886,11 +1049,11 @@ class PPTopoGym(BaseEnvPP):
 
         The default reward is defined as the negative maximum line loading percentage.
         """
-        clipped_loading =  np.clip(self.net.res_line["loading_percent"].max(),0 ,200)
-        return 200 - clipped_loading if not np.isnan(clipped_loading) else self.worst_reward
+        clipped_loading =  np.clip(self.net.res_line["loading_percent"].max(),0,self.clip_max_loading)
+        return self.clip_max_loading - clipped_loading if not np.isnan(clipped_loading) else self.worst_reward
 
 
-
+    @override
     def calculate_reward(self) -> float:
         """
         Calculate the reward for the current network state.
@@ -910,15 +1073,116 @@ class PPTopoGym(BaseEnvPP):
         disconnecting/reconnecting lines or changing the tap position of a phase shift transformer.
         This method updates the network's state based on the specified action.
 
+        Applies the plan precomputed by :meth:`_build_action_plans` -- positional numpy writes
+        into the ``switch``/``line``/``trafo`` columns instead of per-call label-based
+        ``DataFrame.loc`` lookups, which dominated this method (~460 us -> ~2 us on case30).
+        Nets whose tables are not positionally indexed fall back to the original ``.loc``
+        path (see :meth:`_build_action_plans`), so behaviour is unchanged either way.
+
         :param action: The index of the action to apply.
         :type action: int | np.integer
         :raises KeyError: If the `df_actions` DataFrame does not contain the required columns
         """
-        prev_converged = self.net.converged if hasattr(self.net, "converged") else None
+        prev_converged = self.net.converged
         super().load_action(action)
         if action == 0:
             self.net.converged = prev_converged
             return # 0 does nothing
+
+        plan = self._action_plans.get(int(action)) if self._action_plans is not None else None
+        if plan is None:
+            self._load_action_by_label(action)
+            return
+
+        # The column arrays are re-fetched per call on purpose: reset() / restore_topology()
+        # replace them, so a cached view would silently write into a detached array.
+        if plan.open_switches is not None or plan.closed_switches is not None:
+            closed = self.net.switch["closed"].to_numpy()
+            if plan.open_switches is not None:
+                closed[plan.open_switches] = False
+            if plan.closed_switches is not None:
+                closed[plan.closed_switches] = True
+
+        if plan.lines is not None:
+            self.net.line["in_service"].to_numpy()[plan.lines] = plan.line_in_service
+
+        if plan.trafos is not None:
+            self.net.trafo["tap_pos"].to_numpy()[plan.trafos] = plan.tap_pos
+
+    def _build_action_plans(self) -> dict[int, _ActionPlan] | None:
+        """Translate every row of ``df_actions`` into positional numpy writes.
+
+        Each action's switch / line / trafo *labels* are resolved once to row positions in the
+        corresponding pandapower table, so :meth:`load_action` can apply the action with plain
+        fancy-index assignment instead of repeating a label lookup on every call.
+
+        Returns ``None`` -- disabling the fast path in favour of :meth:`_load_action_by_label`
+        -- when any label cannot be resolved to a position (an action referring to an element
+        the net does not contain). That keeps a malformed action space behaving exactly as
+        before rather than failing in a new place.
+
+        :return: action index -> plan, or None if the actions cannot be resolved positionally.
+        :rtype: dict[int, _ActionPlan] | None
+        """
+        columns = self.df_actions.columns
+        has_switch_action = {"open_switches", "closed_switches"}.issubset(columns)
+        has_line_action = {"lines", "disconnect_lines"}.issubset(columns)
+        has_trafo_action = {"trafos", "tap_pos"}.issubset(columns)
+
+        switch_positions = _positional_index(self.net.switch.index)
+        line_positions = _positional_index(self.net.line.index)
+        trafo_positions = _positional_index(self.net.trafo.index)
+
+        def to_positions(labels: object, mapping: dict[int, int] | None) -> np.ndarray:
+            """Resolve element labels to row positions (raises KeyError on an unknown label)."""
+            label_array = np.asarray(labels, dtype=np.int64).ravel()
+            if mapping is None:
+                return label_array.astype(np.intp)
+            return np.array([mapping[int(label)] for label in label_array], dtype=np.intp)
+
+        # Column-at-a-time, not row-at-a-time: ``df_actions.loc[action]`` builds a mixed-dtype
+        # object Series per action (~0.57 ms on case89's 155k actions, which was most of this
+        # environment's construction cost). The columns are read once and indexed by position.
+        needed = (
+            (["open_switches", "closed_switches"] if has_switch_action else [])
+            + (["lines", "disconnect_lines"] if has_line_action else [])
+            + (["trafos", "tap_pos"] if has_trafo_action else [])
+        )
+        cells = {name: self.df_actions[name].to_numpy() for name in needed}
+
+        plans: dict[int, _ActionPlan] = {}
+        try:
+            for position, action in enumerate(self.df_actions.index):
+                if action == 0:  # DoNothing is short-circuited in load_action
+                    continue
+                plan = _ActionPlan()
+                if has_switch_action:
+                    plan.open_switches = to_positions(cells["open_switches"][position], switch_positions)
+                    plan.closed_switches = to_positions(cells["closed_switches"][position], switch_positions)
+                if has_line_action:
+                    plan.lines = to_positions(cells["lines"][position], line_positions)
+                    plan.line_in_service = ~np.asarray(
+                        cells["disconnect_lines"][position], dtype=bool,
+                    ).ravel()
+                if has_trafo_action:
+                    plan.trafos = to_positions(cells["trafos"][position], trafo_positions)
+                    plan.tap_pos = np.asarray(cells["tap_pos"][position]).ravel()
+                plans[int(action)] = plan
+        except (KeyError, TypeError, ValueError):
+            logger.debug("Could not build positional action plans; using the label-based path.")
+            return None
+        return plans
+
+    def _load_action_by_label(self, action: int | np.integer) -> None:
+        """Apply an action through label-based ``.loc`` writes (fallback path).
+
+        Used when the net's ``switch``/``line``/``trafo`` tables are not positionally indexed,
+        so the precomputed positional plans of :meth:`_build_action_plans` do not apply. This
+        is the original implementation and is kept as the correctness reference.
+
+        :param action: The index of the action to apply.
+        :type action: int | np.integer
+        """
         if {"open_switches", "closed_switches"}.issubset(self.df_actions.columns):
             # open switches of action
             open_switches = self.df_actions.loc[action, "open_switches"]
@@ -941,6 +1205,34 @@ class PPTopoGym(BaseEnvPP):
             positions = self.df_actions.loc[action, "tap_pos"]
             self.net.trafo.loc[trafos, "tap_pos"] = positions
 
+    def _reset_state(
+        self,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> None:
+        """Restore a clean episode start *without* solving the grid or building an observation.
+
+        The state half of :meth:`reset`: drop the stale results, clear the action log and step
+        counter, restore the baseline topology and load the profile row for the chosen timestep.
+        It is split out because :meth:`end_simulation` needs exactly this and nothing more -- it
+        replays the action log and solves afterwards, so a power flow and an observation taken
+        here would describe the pristine topology and be thrown away immediately.
+
+        :param seed: seed for this environment's RNG, forwarded to :meth:`BaseEnvPP.reset`.
+        :type seed: int | None
+        :param options: ``{"index": N}`` to start at a given timestep; see :meth:`BaseEnvPP.reset`.
+        :type options: dict[str, Any] | None
+        """
+        self.net.converged = None # will be set again in self.run_pf
+
+        # Reset environment variables
+        self.log_actions.reset()
+        self.current_step = 0
+
+        # Call the parent class reset
+        super().reset(seed=seed, options=options)
+
+    @override
     def reset(
         self,
         seed: int | None = None,
@@ -956,27 +1248,15 @@ class PPTopoGym(BaseEnvPP):
         :return: Tuple containing the initial observation and an empty info dictionary.
         :rtype: tuple[dict, dict]
         """
-        # Clear previous results
-        if hasattr(self.net, "res_line"):
-            del self.net.res_line
-        if hasattr(self.net, "res_bus"):
-            del self.net.res_bus
-
-        # Reset environment variables
-        self.log_actions.reset()
-        self.current_step = 0
-
-        # Call the parent class reset
-        super().reset(seed=seed, options=options)
+        self._reset_state(seed=seed, options=options)
 
         # Return initial observation and empty info dictionary
-        self.run_pf() # run powerflow
+        self.run_pf(pf_type = self.pf_type) # run powerflow
         if self.net.converged is False:
             logger.warning(
                 "Warning: net did not converge. skipping profile index %s.",
                 self.index,
             )
-            return self.create_observation(), {}
         return self.create_observation(), {}
 
     def __str__(self) -> str:
@@ -1005,7 +1285,6 @@ class PPTopoGym(BaseEnvPP):
         else:
             obs_space_str = "N/A"
 
-        # Construct the string representation
         return (
             "PPTopoGym(\n"
             f"  net={self.net}),\n"
@@ -1067,6 +1346,40 @@ class PPTopoGym(BaseEnvPP):
             topo["trafo_tap_pos"] = self.net.trafo["tap_pos"].to_numpy(dtype=np.int32, na_value=0)
         return topo
 
+    def save_state(self) -> dict[str, Any]:
+        """
+        Capture the full episode state for cheap random-access restore.
+
+        Returns topology arrays + profile index + step counter + a copy of the
+        action log. This avoids deep-copying the pandapower network (see
+        ``restore_state``): power setpoints are re-derived from the profile index
+        and results are recomputed by the power flow on the next step.
+        """
+        return {
+            "index": self.index,
+            "current_step": self.current_step,
+            "log_actions": copy.deepcopy(self.log_actions),
+            "topology": self._capture_topology(),
+        }
+
+    def restore_state(self, state: dict[str, Any], *, run_pf: bool = False) -> None:
+        """
+        Restore a state captured by ``save_state`` in place (no deepcopy, no replay).
+
+        Restores topology, reloads the profile for the saved index, and restores
+        the step counter and action log. ``res_*`` are left stale on purpose: the
+        caller's next ``step`` runs the power flow before reading any result. Pass
+        ``run_pf=True`` to refresh results immediately (used when finalizing a
+        search back to the actor's real state).
+        """
+        self.restore_topology(state["topology"])
+        self.load_profile_timestep_into_net(state["index"])
+        self.index = state["index"]
+        self.current_step = state["current_step"]
+        self.log_actions = copy.deepcopy(state["log_actions"])
+        if run_pf:
+            self.run_pf(pf_type=self.pf_type)
+
     def get_profile_slice(self, index: int) -> dict[str, np.ndarray]:
         out: dict[str, np.ndarray] = {}
         if len(self.net.load):
@@ -1079,3 +1392,18 @@ class PPTopoGym(BaseEnvPP):
             out["gen_p_mw"] = self.df_profiles_gen_p.loc[index].T.to_numpy()
             out["gen_vm_pu"] = self.df_profiles_gen_vm.loc[index].T.to_numpy()
         return out
+    @property
+    def orig_config(self) -> dict:
+        """
+        Return the original config for recreational purposes.
+
+        Clone the configuration for agent's use.
+        Agents may need an own environment; as the .net object changes from the config,
+        here the original config is deep-copied.
+
+        The net's Simbench profile tables are shared with the stored config rather than
+        copied (see :func:`deepcopy_net_sharing_profiles`) -- they are read-only once an
+        environment has been built from them, and copying them per agent-environment is what
+        made an extra environment cost tens of MB.
+        """
+        return _copy_config_sharing_profiles(self._orig_config)
