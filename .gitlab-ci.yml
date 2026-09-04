@@ -1,0 +1,47 @@
+image: python:3.10
+
+# Runner used in the gitlab (gnn4gc-cpu-iee is the project runner, asprunner is provided by gitlab)
+default:
+  tags:
+  -  gnn4gc-cpu-iee
+
+stages:
+  - Static Analysis
+  - Test
+  - Build
+# prepare poetry environment inside docker
+before_script:
+  - pip install poetry
+  - poetry install
+  - poetry add simbench # required for one of the notebooks
+  - source `poetry env info --path`/bin/activate
+
+# execute the type checking and linting
+linting:
+  stage: Static Analysis
+  allow_failure: true
+  script:
+    - poetry run mypy
+    - poetry run ruff check
+
+#run the unit tests
+testing:
+  stage: Test
+  script:
+    - poetry run pytest --cov=pandapower_env --cov-fail-under=80
+    - poetry run pytest --nbmake --nbmake-kernel=python3 notebooks --ignore=notebooks/ray_notebook.ipynb --ignore=notebooks/evaluation.ipynb
+  timeout: 3 hours 30 minutes
+  artifacts:
+    paths:
+      - coverage/
+    when: on_success
+    expire_in: 7 days
+
+# package pandapower_env
+building:
+  stage: Build
+  needs:
+    - linting
+    - testing
+  script:
+    - poetry build

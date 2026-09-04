@@ -1,0 +1,22 @@
+# test artifacts
+*.tox*
+__pycache__/
+
+#tests
+tests/conftest.py.coverage
+poetry.lock
+# tests etc
+.coverage
+
+# ide
+/.vscode/*
+/.idea/*
+
+
+# checkpoints
+/checkpoints/**
+/runs/**
+/scripts/out/**
+
+# plots
+/notebooks/plots/**

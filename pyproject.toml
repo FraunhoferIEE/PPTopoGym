@@ -1,0 +1,116 @@
+[tool.poetry]
+name = "pandapower-env"
+version = "0.0.1"
+description = "Pandapower-oriented RL environment"
+authors = ["Kurt Brendlinger <kurt.brendlinger@iee.fraunhofer.de>",
+    ]
+
+license = "European Union Public Licence 1.2 (EUPL 1.2)"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+pandapower = "^3.0"
+matplotlib = "^3.9.2"
+gymnasium = "^1.0.0"
+shapely = "^2.0.6"
+numba  = "^0.60.0"
+lightsim2grid  = "^0.10.1"
+simbench = "^1.5.3"
+ipykernel = "^6.29.5"
+jupyter = "^1.1.1"
+icecream = "^2.1.4"
+torch-geometric = "^2.6.1"
+ray = {extras = ["rllib"], version = "^2.44.1"}
+torch = "^2.7.0"
+joblib = "^1.5.1"
+
+[tool.poetry.group.dev.dependencies]
+ipykernel = "^6.29.5"
+ruff = "^0.5.2"
+pytest-cov = "^6.0.0"
+nbmake = "^1.5.4"
+mypy = "^1.17.1"
+
+[tool.poetry.group.test.dependencies]
+pytest = "^8.2.2"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.mypy]
+files = ["**/*.py"]
+ignore_missing_imports = true
+explicit_package_bases = true
+warn_unused_configs = true
+platform = "linux" # even though the development is done on Windows
+warn_unused_ignores = true
+check_untyped_defs = true
+warn_unreachable = true
+# ==== to do ====
+# warn_return_any = true
+# disallow_untyped_defs = true
+# disallow_untyped_calls = true
+# disallow_untyped_decorators = true
+# disallow_any_expr = true
+# disallow_any_decorated = true
+# disallow_any_explicit = true
+
+[tool.ruff]
+line-length = 120
+include = [
+    "pandapower_env/**/*.py",
+    "tests/**/*.py",
+    "**/pyproject.toml",
+    "rlib_agents/*.py",
+]
+exclude = [
+    "pandapower_env/rlib_agents/training_scripts",  # this file is not used
+]
+
+[tool.ruff.format]
+docstring-code-format = true
+docstring-code-line-length = 120
+line-ending = "native"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+
+    # === Safe to ignore: ===
+
+    "D100",  # Missing docstring in public module
+    "D101",  # Missing docstring in public class
+    "D102",  # Missing docstring in public method
+    "D103",  # Missing docstring in public function
+    "D104",  # Missing docstring in public package
+    "D105",  # Missing docstring in magic method
+
+    "FA102",  # we use python 3.10
+
+    # Added by Kurt
+    "EXE002", # The file is executable but no shebang is present
+
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.isort]
+known-first-party = ["pandapower_env", "tests"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/__init__.py" = [
+    "F401",  # imported but unused
+]
+"tests/**" = [
+    "S101",  # use of assert
+    "SLF001",  # private member access
+    "ANN001", "ANN002", "ANN003",  # missing type annotations
+    "INP001",  # File {filename} is part of an implicit namespace package. Add an __init__.py
+]
+# Keep prints in notebooks
+"*.ipynb" = ["T201", "F401"]
+[tool.coverage.run]
+omit = ["*/__init__.py"]
